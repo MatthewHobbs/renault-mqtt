@@ -40,7 +40,7 @@ the `main.py` split that preceded this (a290 #55). Order runs safest-leaf-first:
 | `charge`  | **here**| Charge-session reconciliation + `CHARGES_ENDPOINT`. No per-model knob.|
 | `debug`   | **here**| Debug-dump + redaction; per-model probes via `EXTRA_SPECIALS`.       |
 | `mqtt`    | **here**| Discovery + client; identity/tables injected via `configure(catalog)`.|
-| `main`    | pending | Poll loop + controls, parameterised by catalog.                   |
+| `main`    | partial | Shared parse/format helpers extracted (`parse`); poll_once + controls stay per-model.|
 
 Per-model variation stays out of here: `catalog.py`, device/node identifiers, endpoint quirks and
 default capacity live in each add-on.
