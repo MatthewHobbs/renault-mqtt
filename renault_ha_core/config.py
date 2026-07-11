@@ -15,10 +15,12 @@ import logging
 import os
 
 # The add-on's environment-variable prefix (e.g. "A290_" / "R5_"), injected by the add-on at
-# startup via `config.ENV_PREFIX = catalog.ENV_PREFIX`. Left empty here so the package carries no
-# model assumption; each add-on MUST set it before logging is configured so the redaction net can
-# see its configured VIN / account_id / username / password (the add-on's suite asserts this).
-ENV_PREFIX = ""
+# startup via `config.ENV_PREFIX = catalog.ENV_PREFIX`. Defaults to None (NOT ""): the redaction
+# net FAILS CLOSED — if an add-on forgets to inject it, _config_secrets raises loudly at the first
+# redaction (startup, caught by CI's boot) rather than silently reading unprefixed names and
+# leaving the configured VIN / account_id / username / password unredacted. A correctly-wired
+# add-on sets it before logging is configured, so this never fires in production.
+ENV_PREFIX = None
 
 # The account id auto-discovered by resolve_account() when <PREFIX>ACCOUNT_ID is left blank. Held
 # here so redact() can mask it in error strings (the Kamereon URL embeds it) even though it was
@@ -45,7 +47,12 @@ def _config_secrets():
     the discovered value is the common case), username, password, and the Supervisor token.
     The Kamereon request URL embeds the VIN + account_id, so an aiohttp error string (which
     includes the URL) carries them — see redact(). Read under ENV_PREFIX so a single injected
-    prefix covers every configured option name."""
+    prefix covers every configured option name. Fails closed if the prefix was never injected."""
+    if ENV_PREFIX is None:
+        raise RuntimeError(
+            "renault_ha_core.config.ENV_PREFIX is not set — the add-on must set it "
+            "(e.g. `config.ENV_PREFIX = catalog.ENV_PREFIX`) before any logging/redaction, "
+            "or configured secrets would not be redacted.")
     return [v for v in (cfg(ENV_PREFIX + "VIN"), cfg(ENV_PREFIX + "ACCOUNT_ID"), _DISCOVERED_ACCOUNT_ID,
                         cfg(ENV_PREFIX + "USERNAME"), cfg(ENV_PREFIX + "PASSWORD"),
                         os.environ.get("SUPERVISOR_TOKEN")) if v]

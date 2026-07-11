@@ -18,6 +18,16 @@ def _prefix(monkeypatch):
     monkeypatch.setattr(config, "ENV_PREFIX", "TEST_")
 
 
+def test_config_secrets_fails_closed_when_prefix_unset(monkeypatch):
+    # Fail closed: if an add-on forgets to inject ENV_PREFIX, redaction must raise loudly rather
+    # than silently read unprefixed names and leave configured secrets unredacted.
+    monkeypatch.setattr(config, "ENV_PREFIX", None)
+    with pytest.raises(RuntimeError, match="ENV_PREFIX is not set"):
+        config._config_secrets()
+    with pytest.raises(RuntimeError, match="ENV_PREFIX is not set"):
+        config.redact("any string reaches _config_secrets")
+
+
 def test_cfg_reads_env_and_defaults(monkeypatch):
     monkeypatch.setenv("TEST_THING", "value")
     assert config.cfg("TEST_THING") == "value"
