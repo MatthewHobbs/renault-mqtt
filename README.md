@@ -36,7 +36,7 @@ the `main.py` split that preceded this (a290 #55). Order runs safest-leaf-first:
 | Module    | Status  | Notes                                                             |
 |-----------|---------|-------------------------------------------------------------------|
 | `util`    | **here**| Pure primitives (`now_ts` / `iso` / `_num`). The walking skeleton.|
-| `config`  | pending | `cfg` / `_opt_flag` / redaction net — parameterise the env prefix.|
+| `config`  | **here**| `cfg` / `_opt_flag` / redaction net; env prefix injected via `ENV_PREFIX`.|
 | `charge`  | pending | Charge-session reconciliation.                                    |
 | `debug`   | pending | Debug-dump + redaction (r5 has an extra `alerts` probe).          |
 | `mqtt`    | pending | Discovery + client (a290 has `_MQTT_CTX`; keepalive/DEVICE differ).|
