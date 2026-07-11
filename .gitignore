@@ -1,0 +1,18 @@
+# macOS / tooling
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Test / coverage artifacts
+.coverage
+htmlcov/
+.pytest_cache/

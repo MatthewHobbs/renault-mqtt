@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renault-ha-core"
+description = "Shared core for the Renault-platform Home Assistant add-ons (Alpine A290, Renault 5)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "MatthewHobbs", email = "matt@matthobbs.net" }]
+requires-python = ">=3.14"
+dynamic = ["version"]
+# No runtime dependencies are declared here yet. The consuming add-ons install this package
+# with `--no-deps` — their own hash-pinned requirements.txt is the single source of truth for
+# renault-api / paho-mqtt / PyYAML. As modules that need those libraries move into the package,
+# add them here (matching the add-ons' pins) so standalone `pip install renault-ha-core` works,
+# but the add-on build stays --no-deps against the hash-locked tree.
+
+[project.urls]
+Homepage = "https://github.com/MatthewHobbs/renault-ha-core"
+
+[tool.setuptools]
+packages = ["renault_ha_core"]
+
+[tool.setuptools.dynamic]
+version = { attr = "renault_ha_core.__version__" }

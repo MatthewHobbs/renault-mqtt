@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Ruff (Python)
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
+        with:
+          src: renault_ha_core tests
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          # Match the add-on runtime: HA base 3.24 ships Python 3.14.
+          python-version: "3.14"
+
+      - name: Install
+        run: |
+          python3 -m pip install --quiet -e .
+          python3 -m pip install --quiet pytest pytest-cov
+
+      - name: pytest
+        # The core is pure, catalog-parameterised code — hold it to 100 % line coverage.
+        run: python3 -m pytest tests -q --cov=renault_ha_core --cov-report=term-missing --cov-fail-under=100
