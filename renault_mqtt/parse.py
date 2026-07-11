@@ -105,3 +105,17 @@ def _enum_label(enum_val, labels, raw):
     if enum_val is not None:
         return labels.get(enum_val, enum_val.name.replace("_", " ").title())
     return "Unknown" if raw is None else f"Unknown ({raw})"
+
+
+def available_energy(raw, soc, capacity_kwh):
+    """Usable battery energy in kWh: the car's reported value when present, else a SoC-based
+    estimate (soc% of the configured capacity). Several Renault-platform cars don't populate
+    batteryAvailableEnergy at all — the R5's battery payload omits it entirely, and the A290's
+    is frequently absent — so without this fallback the Available Energy sensor is permanently
+    unknown. Returns None only when neither a reported value nor a SoC is available."""
+    v = _num(raw)
+    if v is not None:
+        return v
+    if soc is not None:
+        return round(soc / 100.0 * capacity_kwh, 2)
+    return None

@@ -101,6 +101,17 @@ def test_hvac_schedule_fields_active_and_inactive():
     assert empty == {"climate_schedule_mode": None, "climate_ready_time": None}
 
 
+def test_available_energy_prefers_reported_else_estimates_from_soc():
+    # car reports the real value -> use it verbatim
+    assert parse.available_energy(28.4, 55, 52.0) == 28.4
+    assert parse.available_energy("28.4", 55, 52.0) == 28.4
+    # car omits it (e.g. the R5) -> estimate soc% of capacity
+    assert parse.available_energy(None, 50, 52.0) == 26.0
+    assert parse.available_energy(None, 14, 52.0) == 7.28
+    # neither a value nor a SoC -> None (genuinely unknown)
+    assert parse.available_energy(None, None, 52.0) is None
+
+
 def test_hvac_schedule_fields_active_but_no_ready_times():
     sched = types.SimpleNamespace(activated=True, monday=None)   # day present but None -> skipped
     out = parse._hvac_schedule_fields(types.SimpleNamespace(mode="x", schedules=[sched]))
