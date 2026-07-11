@@ -1,4 +1,4 @@
-# renault-ha-core
+# renault-mqtt
 
 Shared core for the Renault-platform Home Assistant add-ons —
 [**a290-ha-addon**](https://github.com/MatthewHobbs/a290-ha-addon) (Alpine A290) and
@@ -20,7 +20,7 @@ source of truth for the third-party dependency tree:
 ```dockerfile
 # after the hash-locked requirements.txt install
 RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
-    "renault-ha-core @ git+https://github.com/MatthewHobbs/renault-ha-core@<immutable-sha>"
+    "renault-mqtt @ git+https://github.com/MatthewHobbs/renault-mqtt@<immutable-sha>"
 ```
 
 The ref is pinned by **immutable commit SHA** (a tag is kept alongside for readability), the same
@@ -49,8 +49,8 @@ default capacity live in each add-on.
 
 ```sh
 pip install -e .
-ruff check renault_ha_core
-python3 -m pytest tests -q --cov=renault_ha_core --cov-report=term-missing --cov-fail-under=100
+ruff check renault_mqtt
+python3 -m pytest tests -q --cov=renault_mqtt --cov-report=term-missing --cov-fail-under=100
 ```
 
 MIT licensed.

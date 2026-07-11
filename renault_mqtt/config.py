@@ -50,7 +50,7 @@ def _config_secrets():
     prefix covers every configured option name. Fails closed if the prefix was never injected."""
     if ENV_PREFIX is None:
         raise RuntimeError(
-            "renault_ha_core.config.ENV_PREFIX is not set — the add-on must set it "
+            "renault_mqtt.config.ENV_PREFIX is not set — the add-on must set it "
             "(e.g. `config.ENV_PREFIX = catalog.ENV_PREFIX`) before any logging/redaction, "
             "or configured secrets would not be redacted.")
     return [v for v in (cfg(ENV_PREFIX + "VIN"), cfg(ENV_PREFIX + "ACCOUNT_ID"), _DISCOVERED_ACCOUNT_ID,

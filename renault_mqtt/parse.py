@@ -9,7 +9,7 @@ in each add-on's poll_once; these just parse/format the values it feeds in.
 
 Depends only on the util leaf (`_num`).
 """
-from renault_ha_core.util import _num
+from renault_mqtt.util import _num
 
 KM_TO_MI = 0.621371
 

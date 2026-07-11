@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "renault-ha-core"
+name = "renault-mqtt"
 description = "Shared core for the Renault-platform Home Assistant add-ons (Alpine A290, Renault 5)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -13,16 +13,16 @@ dynamic = ["version"]
 # Runtime deps are declared as the modules that need them move in — pinned to match the add-ons.
 # The consuming add-ons install this package with `--no-deps`, so their own hash-pinned
 # requirements.txt stays the single source of truth for the shipped image; these pins only make
-# standalone `pip install renault-ha-core` (and this repo's own CI) resolve correctly.
+# standalone `pip install renault-mqtt` (and this repo's own CI) resolve correctly.
 dependencies = [
     "paho-mqtt==2.1.0",   # mqtt seam
 ]
 
 [project.urls]
-Homepage = "https://github.com/MatthewHobbs/renault-ha-core"
+Homepage = "https://github.com/MatthewHobbs/renault-mqtt"
 
 [tool.setuptools]
-packages = ["renault_ha_core"]
+packages = ["renault_mqtt"]
 
 [tool.setuptools.dynamic]
-version = { attr = "renault_ha_core.__version__" }
+version = { attr = "renault_mqtt.__version__" }

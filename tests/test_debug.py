@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from renault_ha_core import config, debug
+from renault_mqtt import config, debug
 
 
 @pytest.fixture(autouse=True)

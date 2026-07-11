@@ -1,5 +1,5 @@
 """Tests for the util seam: the shared pure primitives (`now_ts` / `iso` / `_num`)."""
-from renault_ha_core import util
+from renault_mqtt import util
 
 
 def test_num_rounds_and_tolerates_garbage():

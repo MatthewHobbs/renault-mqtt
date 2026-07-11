@@ -25,10 +25,10 @@ import logging
 
 import paho.mqtt.client as paho_mqtt
 
-from renault_ha_core import config
-from renault_ha_core.config import _opt_flag, cfg
+from renault_mqtt import config
+from renault_mqtt.config import _opt_flag, cfg
 
-LOG = logging.getLogger("renault_ha_core.mqtt")
+LOG = logging.getLogger("renault_mqtt.mqtt")
 
 DISCOVERY_PREFIX = "homeassistant"
 

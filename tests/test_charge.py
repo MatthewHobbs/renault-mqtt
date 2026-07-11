@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from renault_ha_core import charge, util
+from renault_mqtt import charge, util
 
 
 class Battery:

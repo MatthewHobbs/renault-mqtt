@@ -17,9 +17,9 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from renault_ha_core import config
+from renault_mqtt import config
 
-LOG = logging.getLogger("renault_ha_core.debug")
+LOG = logging.getLogger("renault_mqtt.debug")
 
 # No-arg readable telemetry endpoints. Deliberately excludes get_location (GPS), get_contracts
 # and get_notification_settings — those carry location / contact / account PII with no

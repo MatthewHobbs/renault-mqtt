@@ -14,9 +14,9 @@ CHARGES_ENDPOINT, for its endpoint-support probe).
 import logging
 from datetime import datetime, timedelta, timezone
 
-from renault_ha_core.util import _num, iso, now_ts
+from renault_mqtt.util import _num, iso, now_ts
 
-LOG = logging.getLogger("renault_ha_core.charge")
+LOG = logging.getLogger("renault_mqtt.charge")
 
 # The Kamereon charges-endpoint name, probed via supports_endpoint() at startup. Identical for
 # every Renault-platform model, so it lives here with the charge logic rather than in each

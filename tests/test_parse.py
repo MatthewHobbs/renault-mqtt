@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-from renault_ha_core import parse
+from renault_mqtt import parse
 
 
 class _E(enum.Enum):

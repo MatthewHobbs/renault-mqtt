@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from renault_ha_core import config, mqtt
+from renault_mqtt import config, mqtt
 
 _FAKE_CATALOG = types.SimpleNamespace(
     NODE="test_node",
@@ -296,7 +296,7 @@ def test_on_connect_refused_does_not_subscribe_or_announce(caplog):
     import logging
     c = StubClient()
     mqtt._MQTT_CTX["supported"] = _ALL_EPS
-    with caplog.at_level(logging.WARNING, logger="renault_ha_core.mqtt"):
+    with caplog.at_level(logging.WARNING, logger="renault_mqtt.mqtt"):
         mqtt._on_connect(c, None, None, 5)   # refused CONNACK -> guard fires
     assert c.subs == [] and c.pub == {}                      # no subscribe / no online / no discovery
     assert any("refused" in r.message for r in caplog.records)
@@ -304,7 +304,7 @@ def test_on_connect_refused_does_not_subscribe_or_announce(caplog):
 
 def test_on_disconnect_warns_only_on_error(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="renault_ha_core.mqtt"):
+    with caplog.at_level(logging.WARNING, logger="renault_mqtt.mqtt"):
         mqtt._on_disconnect(None, None, None, 0)
         assert not caplog.records
         mqtt._on_disconnect(None, None, None, 1)
