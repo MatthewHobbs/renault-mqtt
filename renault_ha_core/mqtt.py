@@ -88,11 +88,18 @@ def _on_message(client, userdata, msg):
 
 
 def _on_connect(client, userdata, flags, reason_code, properties=None):
+    # Guard on a successful CONNACK: on a refused connect (rc != 0) the client isn't connected, so
+    # don't claim "online" or attempt (no-op) subscribes/republishes — paho will retry via the
+    # bounded backoff, and this runs again on the eventual success. Runs on the initial connect AND
+    # every reconnect, so the discovery re-publish (from _MQTT_CTX) survives a broker restart.
+    if reason_code != 0:
+        LOG.warning("MQTT connect refused: %s", reason_code)
+        return
     client.subscribe(f"{CMD_PREFIX}#")
     if _MQTT_CTX["supported"] is not None:
         publish_discovery(client, _MQTT_CTX["supported"], _MQTT_CTX["dist_unit"])
     client.publish(AVAIL_TOPIC, "online", retain=True)
-    LOG.info("MQTT connected (rc=%s) — subscribed to commands, discovery (re)published", reason_code)
+    LOG.info("MQTT connected — subscribed to commands, discovery (re)published")
 
 
 def _on_disconnect(client, userdata, flags, reason_code, properties=None):
