@@ -6,4 +6,4 @@ primitives live here once, parameterised by the add-on's catalog, instead of bei
 between the sibling repos. See the ``renault-ha-core`` repo README for the extraction plan.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -10,11 +10,13 @@ license = { text = "MIT" }
 authors = [{ name = "MatthewHobbs", email = "matt@matthobbs.net" }]
 requires-python = ">=3.14"
 dynamic = ["version"]
-# No runtime dependencies are declared here yet. The consuming add-ons install this package
-# with `--no-deps` — their own hash-pinned requirements.txt is the single source of truth for
-# renault-api / paho-mqtt / PyYAML. As modules that need those libraries move into the package,
-# add them here (matching the add-ons' pins) so standalone `pip install renault-ha-core` works,
-# but the add-on build stays --no-deps against the hash-locked tree.
+# Runtime deps are declared as the modules that need them move in — pinned to match the add-ons.
+# The consuming add-ons install this package with `--no-deps`, so their own hash-pinned
+# requirements.txt stays the single source of truth for the shipped image; these pins only make
+# standalone `pip install renault-ha-core` (and this repo's own CI) resolve correctly.
+dependencies = [
+    "paho-mqtt==2.1.0",   # mqtt seam
+]
 
 [project.urls]
 Homepage = "https://github.com/MatthewHobbs/renault-ha-core"

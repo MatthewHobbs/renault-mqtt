@@ -39,7 +39,7 @@ the `main.py` split that preceded this (a290 #55). Order runs safest-leaf-first:
 | `config`  | **here**| `cfg` / `_opt_flag` / redaction net; env prefix injected via `ENV_PREFIX`.|
 | `charge`  | **here**| Charge-session reconciliation + `CHARGES_ENDPOINT`. No per-model knob.|
 | `debug`   | **here**| Debug-dump + redaction; per-model probes via `EXTRA_SPECIALS`.       |
-| `mqtt`    | pending | Discovery + client (a290 has `_MQTT_CTX`; keepalive/DEVICE differ).|
+| `mqtt`    | **here**| Discovery + client; identity/tables injected via `configure(catalog)`.|
 | `main`    | pending | Poll loop + controls, parameterised by catalog.                   |
 
 Per-model variation stays out of here: `catalog.py`, device/node identifiers, endpoint quirks and
