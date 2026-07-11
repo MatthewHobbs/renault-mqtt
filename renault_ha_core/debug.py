@@ -55,12 +55,17 @@ _DEBUG_STATE = {"dumped": False}
 # Optional per-model probe hook. An add-on may set this to a callable
 # `(vehicle, start, end) -> iterable of (name, present, call)` to add extra endpoints to the dump
 # beyond the shared date-ranged ones (get_charges / get_charge_history) — e.g. the R5's raw
-# `alerts` GET. `present` is the truthy capability check (None -> skipped); `call` is an awaitable
-# factory. Left None here; the A290 registers nothing.
+# `alerts` GET. `present` is the truthy capability check (falsy -> skipped); `call` is an
+# awaitable factory. Left None here; the A290 registers nothing.
 EXTRA_SPECIALS = None
 
 
 def debug_enabled():
+    # Fail closed if the add-on never injected its prefix: don't dump (a diagnostic dump on a
+    # misconfigured install is the one that could leak). The config redaction net raises loudly
+    # on the same misconfiguration, so this stays silent rather than crashing the poll loop.
+    if config.ENV_PREFIX is None:
+        return False
     return config.cfg(config.ENV_PREFIX + "DEBUG_DUMP", "false").strip().lower() in ("true", "1", "on")
 
 
@@ -119,7 +124,7 @@ async def dump_api(vehicle):
     if EXTRA_SPECIALS is not None:
         specials += list(EXTRA_SPECIALS(vehicle, start, end))
     for name, present, call in specials:
-        if present is not None:
+        if present:
             await _dump_one(out, name, call, secrets)
     LOG.warning("API DEBUG DUMP — may contain personal data; redaction is best-effort, do NOT "
                 "paste publicly. One-shot per restart; turn debug_dump off when done.\n%s",

@@ -55,6 +55,14 @@ def test_debug_enabled_reads_flag_under_prefix(monkeypatch):
     assert debug.debug_enabled() is False
 
 
+def test_debug_enabled_fails_closed_when_prefix_unset(monkeypatch):
+    # If the add-on never injected its prefix, don't dump (fail closed for a diagnostic that
+    # could leak on a misconfigured install) — and don't crash on None + str.
+    monkeypatch.setattr(config, "ENV_PREFIX", None)
+    monkeypatch.setenv("DEBUG_DUMP", "true")
+    assert debug.debug_enabled() is False
+
+
 def test_debug_redact_masks_ids_and_secret_values_but_keeps_telemetry():
     out = debug._debug_redact(
         {
