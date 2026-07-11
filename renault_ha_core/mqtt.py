@@ -169,13 +169,19 @@ def publish_discovery(client, supported_eps, dist_unit):
         client.publish(ATTR_TOPIC, "", retain=True)
         client.publish(TRACKER_STATE_TOPIC, "", retain=True)
     buttons = []
+    # The discovery node segment + object_id derive from the object_id (short); the command suffix
+    # is the same by default, but a model whose command name differs from its entity id can remap it
+    # via the optional catalog.BUTTON_CMD_OVERRIDES {object_id: cmd_suffix} — e.g. the R5 ships
+    # object_id "r5_flash_lights" but commands on "lights". a290 has no overrides (cmd == short).
+    cmd_overrides = getattr(cat, "BUTTON_CMD_OVERRIDES", {})
     for obj, (name, icon, ep) in cat.ACTION_BUTTONS.items():
         short = obj.removeprefix(prefix)
+        cmd = cmd_overrides.get(obj, short)
         topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{short}/config"
         # Suppress the location-refresh button too when the user has opted out of location.
         if ep in supported_eps and not (ep == cat.REFRESH_LOCATION_EP and not PUBLISH_LOCATION):
             conf = {"name": name, "object_id": obj, "unique_id": obj,
-                    "command_topic": f"{CMD_PREFIX}{short}", "availability_topic": AVAIL_TOPIC,
+                    "command_topic": f"{CMD_PREFIX}{cmd}", "availability_topic": AVAIL_TOPIC,
                     "icon": icon, "device": DEVICE}
             client.publish(topic, json.dumps(conf), retain=True)
             buttons.append(short)

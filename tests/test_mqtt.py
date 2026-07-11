@@ -167,6 +167,18 @@ def test_buttons_gated_on_support_and_location(monkeypatch):
     assert c.pub[f"{base}/refresh/config"] == ""
 
 
+def test_button_cmd_override_remaps_command_topic_only(monkeypatch):
+    # A model whose command name differs from its entity id (e.g. R5: object_id "r5_flash_lights"
+    # commanded on "lights") remaps ONLY the command suffix via BUTTON_CMD_OVERRIDES; the discovery
+    # topic node + object_id stay derived from the object_id, so the entity id is unchanged.
+    monkeypatch.setattr(_FAKE_CATALOG, "BUTTON_CMD_OVERRIDES", {"tst_wake": "wakeup"}, raising=False)
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    conf = json.loads(c.pub["homeassistant/button/test_node/wake/config"])   # node still 'wake'
+    assert conf["object_id"] == "tst_wake"                                   # entity id unchanged
+    assert conf["command_topic"] == "test_node/cmd/wakeup"                   # only the command remapped
+
+
 def test_numbers_published_when_soc_supported_else_cleared():
     base = "homeassistant/number/test_node"
     c = StubClient()
