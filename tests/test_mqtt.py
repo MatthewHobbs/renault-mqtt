@@ -61,9 +61,22 @@ class StubClient:
     def __init__(self):
         self.pub = {}
         self.subs = []
+        # Ordered (topic, payload, retain) log. `pub` is last-write-wins per topic, which cannot
+        # express a sequence of writes to the SAME topic -- exactly what the tracker state-topic
+        # migration is. Assertions about ordering or retention must use this.
+        self.log = []
 
     def publish(self, topic, payload, retain=False):
         self.pub[topic] = payload
+        self.log.append((topic, payload, retain))
+
+    def writes(self, topic):
+        """Every (payload, retain) written to `topic`, in order."""
+        return [(p, r) for t, p, r in self.log if t == topic]
+
+    def index_of(self, topic, payload):
+        """Position of a specific write in the overall publish order."""
+        return next(i for i, (t, p, _) in enumerate(self.log) if t == topic and p == payload)
 
     def subscribe(self, topic):
         self.subs.append(topic)
@@ -143,12 +156,52 @@ def test_location_tracker_published_and_cleared(monkeypatch):
     mqtt.publish_discovery(c, _ALL_EPS, "km")
     conf = json.loads(c.pub[tracker])
     assert conf["object_id"] == "tst_car_location" and conf["source_type"] == "gps"
+    assert conf["json_attributes_topic"] == "test_node/location/attributes"
     # opt-out clears the tracker + retained GPS
     c = StubClient()
     monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", False)
     mqtt.publish_discovery(c, _ALL_EPS, "km")
     assert c.pub[tracker] == "" and c.pub["test_node/location/attributes"] == ""
     assert c.pub["test_node/location/state"] == ""
+
+
+def test_location_tracker_declares_no_state_topic(monkeypatch):
+    """A state-topic payload becomes location_name, which wins over the lat/lon attributes and stops
+    the entity ever resolving a zone. Its ABSENCE from the discovery config is the invariant."""
+    c = StubClient()
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", True)
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    conf = json.loads(c.pub["homeassistant/device_tracker/test_node/location/config"])
+    assert "state_topic" not in conf
+    assert conf["json_attributes_topic"] == "test_node/location/attributes"
+
+
+@pytest.mark.parametrize("publish_location", [True, False])
+def test_location_state_topic_migration_is_ordered_and_retained(monkeypatch, publish_location):
+    """The upgrade purge is a SEQUENCE, and each step is load-bearing:
+
+      reset ("None", retained)  ->  discovery without state_topic  ->  tombstone ("", retained)
+
+    Reset must land while a pre-upgrade HA still subscribes, or location_name is never cleared and
+    the entity keeps reading "online" until a restart. The tombstone must land after the config, or
+    the broker keeps a value for a future subscriber. Asserting only the final value would pass for
+    a wrong order, a missing reset, or a non-retained write -- so assert the log, not `pub`.
+    """
+    state, config_topic = "test_node/location/state", "homeassistant/device_tracker/test_node/location/config"
+    c = StubClient()
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", publish_location)
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+
+    assert c.writes(state) == [(mqtt.TRACKER_PAYLOAD_RESET, True), ("", True)]
+    assert (c.index_of(state, mqtt.TRACKER_PAYLOAD_RESET)
+            < c.index_of(config_topic, c.pub[config_topic])
+            < c.index_of(state, ""))
+
+
+def test_tracker_payload_reset_matches_ha_default():
+    """HA's device_tracker payload_reset defaults to the literal string "None"; an empty payload is
+    ignored and will NOT clear location_name. Pinned so the two never get conflated."""
+    assert mqtt.TRACKER_PAYLOAD_RESET == "None"
 
 
 def test_buttons_gated_on_support_and_location(monkeypatch):

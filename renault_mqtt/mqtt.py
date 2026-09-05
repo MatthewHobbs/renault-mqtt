@@ -32,6 +32,11 @@ LOG = logging.getLogger("renault_mqtt.mqtt")
 
 DISCOVERY_PREFIX = "homeassistant"
 
+# Home Assistant's default payload_reset for an MQTT device_tracker state topic. Receiving it clears
+# location_name, which is what lets the entity fall back to resolving its zone from lat/lon. An empty
+# payload will NOT do this -- HA ignores empty state payloads -- so the two are not interchangeable.
+TRACKER_PAYLOAD_RESET = "None"
+
 # Per-model identity + discovery tables, injected by configure() at startup. None until then.
 _CAT = None
 NODE = None
@@ -163,10 +168,25 @@ def publish_discovery(client, supported_eps, dist_unit):
             conf["icon"] = cat.ICONS[obj]
         client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
     tracker_topic = f"{DISCOVERY_PREFIX}/device_tracker/{NODE}/location/config"
+    # The tracker deliberately declares NO state topic. Home Assistant derives home/away and the zone
+    # name from the lat/lon on json_attributes_topic, but only while location_name is None; a
+    # state-topic payload sets location_name, which then wins over the coordinates. Publishing
+    # connectivity there ("online" on every successful poll, as the add-ons used to) therefore
+    # pinned the entity to "online" and it could never report a zone. Availability already belongs
+    # on availability_topic, so the state topic is retired and deliberately left unowned.
+    #
+    # MIGRATION -- the order below is load-bearing:
+    #   1. reset payload, while a pre-upgrade HA is still subscribed, clears location_name live so
+    #      the entity recovers without waiting for a restart;
+    #   2. discovery without state_topic makes HA drop the subscription;
+    #   3. tombstone, so the broker retains nothing a future subscriber could inherit.
+    # Steps 1 and 3 are not interchangeable: an empty payload is ignored by HA and cannot reset,
+    # and a retained reset payload would itself become the thing a future subscriber inherits.
+    client.publish(TRACKER_STATE_TOPIC, TRACKER_PAYLOAD_RESET, retain=True)
     if PUBLISH_LOCATION:
         loc_id = f"{prefix}car_location"
         tracker = {"name": "Location", "object_id": loc_id, "unique_id": loc_id,
-                   "state_topic": TRACKER_STATE_TOPIC, "json_attributes_topic": ATTR_TOPIC,
+                   "json_attributes_topic": ATTR_TOPIC,
                    "availability_topic": AVAIL_TOPIC, "source_type": "gps", "device": DEVICE}
         client.publish(tracker_topic, json.dumps(tracker), retain=True)
     else:
@@ -174,7 +194,7 @@ def publish_discovery(client, supported_eps, dist_unit):
         # broker so an earlier fix doesn't linger after the user turns location off.
         client.publish(tracker_topic, "", retain=True)
         client.publish(ATTR_TOPIC, "", retain=True)
-        client.publish(TRACKER_STATE_TOPIC, "", retain=True)
+    client.publish(TRACKER_STATE_TOPIC, "", retain=True)
     buttons = []
     # The discovery node segment + object_id derive from the object_id (short); the command suffix
     # is the same by default, but a model whose command name differs from its entity id can remap it
