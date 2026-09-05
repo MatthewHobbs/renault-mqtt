@@ -1,0 +1,68 @@
+# Tags a release when __version__ changes on main.
+#
+# Triggered by CI completing rather than by the push itself, so a tag can only ever land on a
+# commit that has actually validated - the release must never be published from an unvalidated
+# SHA. github.event.workflow_run.head_sha is that exact commit.
+#
+# Idempotent: every successful CI run on main reaches this workflow, and it no-ops unless
+# __version__ names a tag that does not exist yet. 0.13.0 and 0.13.1 shipped untagged because
+# this was a manual step; the add-ons pin the core by SHA and Renovate now tracks it by tag, so
+# a missed tag silently stops those bumps being offered.
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag release
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to push the tag and create the release; nothing else here writes.
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # The validated commit, not the branch head: main may have moved on since CI ran, and
+          # tagging a newer, unvalidated commit is exactly what this gate exists to prevent.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Read version and check for an existing tag
+        id: v
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import renault_mqtt, sys; sys.stdout.write(renault_mqtt.__version__)")"
+          case "$version" in
+            "") echo "::error::__version__ is empty"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version already tagged - nothing to do"
+            echo "tag_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version has no tag yet"
+            echo "tag_needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and release
+        if: steps.v.outputs.tag_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Annotated, to match the tags created by hand before this workflow existed.
+          git tag -a "v$VERSION" "$SHA" -m "renault-mqtt v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --verify-tag --generate-notes --title "renault-mqtt v$VERSION"
