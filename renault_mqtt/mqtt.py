@@ -134,6 +134,13 @@ def publish_discovery(client, supported_eps, dist_unit):
             if ep not in supported_eps for obj in objs}
     for obj in set(skip) | set(cat.RETIRED_SENSORS):
         client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", "", retain=True)
+    # Name what was withheld and why. A user reporting "entity X is missing" otherwise has to
+    # infer it from a count, and a retired object_id looks identical to an unsupported one.
+    if skip:
+        LOG.debug("Sensors cleared (endpoint unsupported): %s", sorted(skip))
+    if cat.RETIRED_SENSORS:
+        LOG.debug("Sensors cleared (retired in this build, dashboards must not reference them "
+                  "as sensor.*): %s", sorted(cat.RETIRED_SENSORS))
     published = 0
     for obj, (name, dev_class, unit, state_class) in cat.SENSORS.items():
         if obj in skip:
@@ -216,6 +223,11 @@ def publish_discovery(client, supported_eps, dist_unit):
             client.publish(topic, "", retain=True)
     numbers = []
     soc_ok = cat.SOC_ENDPOINT in supported_eps
+    if not soc_ok:
+        # The summary line below reports numbers=none, which reads as "nothing to publish"
+        # rather than "your car does not expose this". Say which endpoint was missing.
+        LOG.info("SOC target controls withheld: endpoint %r not in supported endpoints — "
+                 "%s will not exist on this vehicle", cat.SOC_ENDPOINT, sorted(cat.NUMBERS))
     for obj, (name, icon, mn, mx, step) in cat.NUMBERS.items():
         short = obj.removeprefix(prefix)
         topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{short}/config"
