@@ -15,6 +15,10 @@ on:
     workflows: [CI]
     types: [completed]
     branches: [main]
+  # Manual dry run only: proves the signing path without waiting for a version bump.
+  # The tag job below is gated on workflow_run.conclusion, which is null here, so a
+  # dispatch can never publish a real release.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -83,3 +87,59 @@ jobs:
           git tag -s "v$VERSION" "$SHA" -m "renault-mqtt v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" --verify-tag --generate-notes --title "renault-mqtt v$VERSION"
+
+  verify-signing:
+    name: Verify tag signing (dry run)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Sign a throwaway tag, confirm GitHub verifies it, then delete it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY: ${{ secrets.TAG_SIGNING_KEY }}
+          REPO: ${{ github.repository }}
+          TAG: signing-check-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::TAG_SIGNING_KEY is not set."
+            exit 1
+          fi
+          umask 077
+          keyfile="$(mktemp)"
+          # Delete the remote tag on every exit path, so a failure midway cannot leave a
+          # stray tag behind. Both are best-effort: the tag may not exist yet.
+          cleanup() {
+            git push --delete origin "$TAG" >/dev/null 2>&1 || true
+            rm -f "$keyfile"
+          }
+          trap cleanup EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$keyfile"
+          git config user.name "Matthew Hobbs"
+          git config user.email "matt@matthobbs.net"
+          git config gpg.format ssh
+          git config user.signingkey "$keyfile"
+
+          # Deliberately not a vX.Y.Z name: a non-semver tag cannot be mistaken for a
+          # release by the add-ons' Renovate, which reads this repo with the semver
+          # versioning scheme.
+          git tag -s "$TAG" HEAD -m "signing check (dry run, deleted immediately)"
+          git push origin "$TAG"
+
+          tag_object="$(git rev-parse "$TAG")"
+          verification="$(gh api "repos/$REPO/git/tags/$tag_object" --jq '.verification')"
+          echo "verification: $verification"
+          verified="$(printf '%s' "$verification" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verified"])')"
+          reason="$(printf '%s' "$verification" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
+          if [ "$verified" != "True" ]; then
+            echo "::error::GitHub did not verify the signed tag (reason: $reason)."
+            exit 1
+          fi
+          echo "Signed tag verified by GitHub (reason: $reason)."
+
