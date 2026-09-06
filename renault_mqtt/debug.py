@@ -21,9 +21,19 @@ from renault_mqtt import config
 
 LOG = logging.getLogger("renault_mqtt.debug")
 
-# No-arg readable telemetry endpoints. Deliberately excludes get_location (GPS), get_contracts
-# and get_notification_settings — those carry location / contact / account PII with no
-# sensor-mapping diagnostic value. Includes ones a given model forbids (charge-mode, pressure,
+# No-arg readable telemetry endpoints. Excludes get_contracts and get_notification_settings —
+# those carry contact / account PII with no sensor-mapping diagnostic value.
+#
+# get_location WAS excluded on the same grounds and was added back on 2026-09-06, because the
+# premise turned out to be wrong on both halves. It does have diagnostic value: an A290 sat on
+# a lastUpdateTime of 2026-09-02T11:43:14Z for four days while every other endpoint polled
+# healthily, and there was no way to see what the location endpoint was actually returning —
+# the one misbehaving endpoint was the one the dump could not show. And the PII objection is
+# already handled structurally rather than by omission: gpslatitude / gpslongitude / latitude /
+# longitude are in _DEBUG_REDACT_KEYS and are masked by key regardless of which endpoint
+# produced them, so what survives into the log is lastUpdateTime and gpsDirection — a timestamp
+# and a heading, which is exactly the diagnostic signal and none of the position. A test pins
+# that: if the coordinates ever stop being redacted here, it fails. Includes ones a given model forbids (charge-mode, pressure,
 # lock-status, res-state, hvac-history, hvac-sessions) so the dump documents the full
 # supported/forbidden picture. Date-ranged endpoints (charges, charge-history) are probed
 # separately below — they can't be called arg-less.
@@ -31,7 +41,7 @@ _DEBUG_METHODS = [
     "get_details", "get_car_adapter", "get_battery_status", "get_battery_soc", "get_cockpit",
     "get_hvac_status", "get_hvac_settings", "get_hvac_history", "get_hvac_sessions",
     "get_charge_schedule", "get_charge_mode", "get_charging_settings",
-    "get_tyre_pressure", "get_lock_status", "get_res_state",
+    "get_tyre_pressure", "get_lock_status", "get_res_state", "get_location",
 ]
 _DEBUG_RANGE_DAYS = 30
 # Keys masked regardless of value type — identifiers / contact / location fields.
