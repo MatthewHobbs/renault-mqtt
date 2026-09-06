@@ -116,3 +116,64 @@ def test_hvac_schedule_fields_active_but_no_ready_times():
     sched = types.SimpleNamespace(activated=True, monday=None)   # day present but None -> skipped
     out = parse._hvac_schedule_fields(types.SimpleNamespace(mode="x", schedules=[sched]))
     assert out["climate_ready_time"] is None      # no parts -> None
+
+
+# --------------------------------------------------------------------------- #
+# location_attrs — sentinel rejection
+# --------------------------------------------------------------------------- #
+
+class _Loc:
+    def __init__(self, lat, lon, t="2026-09-06T17:37:31Z"):
+        self.gpsLatitude, self.gpsLongitude, self.lastUpdateTime = lat, lon, t
+
+
+def test_location_attrs_accepts_a_real_fix():
+    out = parse.location_attrs(_Loc(51.9473, -0.6274), 4)
+    assert out["latitude"] == 51.9473 and out["longitude"] == -0.6274
+    assert out["last_update"] == "2026-09-06T17:37:31Z"
+    assert out["gps_accuracy"] == 11
+
+
+def test_location_attrs_rejects_the_91_181_sentinel():
+    """The real payload that broke presence on 2026-09-06: each value exactly one unit past the
+    maximum, carried on a genuinely fresh timestamp. Publishing it flipped the car to not_home
+    while it was parked at home."""
+    assert parse.location_attrs(_Loc(91, 181), 4) is None
+
+
+def test_location_attrs_rejects_out_of_range_either_axis():
+    assert parse.location_attrs(_Loc(90.0001, 0.5), 4) is None
+    assert parse.location_attrs(_Loc(45.0, 180.0001), 4) is None
+    assert parse.location_attrs(_Loc(-90.0001, 0.5), 4) is None
+    assert parse.location_attrs(_Loc(45.0, -180.0001), 4) is None
+
+
+def test_location_attrs_accepts_the_exact_boundaries():
+    assert parse.location_attrs(_Loc(90, 180), 4) is not None
+    assert parse.location_attrs(_Loc(-90, -180), 4) is not None
+
+
+def test_location_attrs_rejects_null_island():
+    assert parse.location_attrs(_Loc(0, 0), 4) is None
+    # a genuine fix on one axis only is still a fix
+    assert parse.location_attrs(_Loc(0, -0.6274), 4) is not None
+    assert parse.location_attrs(_Loc(51.9473, 0), 4) is not None
+
+
+def test_location_attrs_rejects_missing_or_unparseable():
+    assert parse.location_attrs(_Loc(None, None), 4) is None
+    assert parse.location_attrs(_Loc(51.9, None), 4) is None
+    assert parse.location_attrs(_Loc("nonsense", "nonsense"), 4) is None
+    assert parse.location_attrs(object(), 4) is None
+
+
+def test_location_attrs_keeps_full_coordinate_precision():
+    """_num() rounds to 2 dp — about a kilometre at these latitudes — so coordinates must not go
+    through it. Caught by test on 2026-09-06 when the first cut of this helper reused it."""
+    out = parse.location_attrs(_Loc(51.94714580532739, -0.6274554155641877), 6)
+    assert out["latitude"] == 51.947146 and out["longitude"] == -0.627455
+
+
+def test_location_attrs_rejects_nan_and_inf():
+    assert parse.location_attrs(_Loc(float("nan"), 0.5), 4) is None
+    assert parse.location_attrs(_Loc(float("inf"), 0.5), 4) is None
