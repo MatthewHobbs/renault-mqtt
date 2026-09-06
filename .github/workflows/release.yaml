@@ -1,4 +1,4 @@
-# Tags a release when __version__ changes on main.
+# Tags a release when __version__ changes on main, signing the tag with an SSH signing key.
 #
 # Triggered by CI completing rather than by the push itself, so a tag can only ever land on a
 # commit that has actually validated - the release must never be published from an unvalidated
@@ -58,11 +58,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.v.outputs.version }}
           SHA: ${{ github.event.workflow_run.head_sha }}
+          # Private half of a signing-only SSH key, registered on the account as a *signing*
+          # key. Deliberately not the key used to push: this one can only vouch for tags.
+          SIGNING_KEY: ${{ secrets.TAG_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Annotated, to match the tags created by hand before this workflow existed.
-          git tag -a "v$VERSION" "$SHA" -m "renault-mqtt v$VERSION"
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::TAG_SIGNING_KEY is not set - refusing to publish an unsigned tag."
+            exit 1
+          fi
+          # umask before the file exists: mktemp is 600 already, but this keeps it so if the
+          # runner image ever changes defaults. Removed on any exit path, including failure.
+          umask 077
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$keyfile"
+          # Tagger identity must be a verified email on the account owning the signing key,
+          # or GitHub shows the tag as Unverified. This address is already public in every
+          # commit in this repo.
+          git config user.name "Matthew Hobbs"
+          git config user.email "matt@matthobbs.net"
+          git config gpg.format ssh
+          git config user.signingkey "$keyfile"
+          git tag -s "v$VERSION" "$SHA" -m "renault-mqtt v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" --verify-tag --generate-notes --title "renault-mqtt v$VERSION"
