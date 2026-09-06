@@ -119,3 +119,46 @@ def available_energy(raw, soc, capacity_kwh):
     if soc is not None:
         return round(soc / 100.0 * capacity_kwh, 2)
     return None
+
+
+def location_attrs(loc, precision):
+    """Build device_tracker attributes from a Kamereon location payload, or None when the
+    payload carries no usable fix.
+
+    Kamereon answers "I have no position" with an out-of-band SENTINEL rather than a null or an
+    error: an A290 returned gpsLatitude 91 / gpsLongitude 181 on 2026-09-06 — each exactly one
+    unit past the maximum — alongside a genuinely fresh lastUpdateTime, because the car had woken
+    and honestly reported that it had no fix. The previous `lat is not None and lon is not None`
+    check passed that straight through, so the tracker published an impossible coordinate as a
+    real position and flipped the car to not_home while it sat on the drive. Worse, the staleness
+    guard keys on the timestamp, which WAS fresh, so it disarmed at the same moment.
+
+    Rejecting the payload (rather than clamping it) keeps the last known-good fix on the retained
+    topic and leaves the staleness guard armed, which is the honest signal: the position is old,
+    and we know it is old.
+
+    0, 0 is rejected too. It is a real coordinate in the Gulf of Guinea and a classic null-island
+    sentinel; for a vehicle it is overwhelmingly the latter.
+    """
+    # NOT _num(): that rounds to 2 dp, which is ~1 km of GPS error and would also round the
+    # 90.0001 edge case down to a valid 90.0. Coordinates keep full precision until the caller's
+    # own gps_precision rounding.
+    def _coord(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return v if v == v and abs(v) != float("inf") else None   # reject NaN / inf
+
+    lat = _coord(getattr(loc, "gpsLatitude", None))
+    lon = _coord(getattr(loc, "gpsLongitude", None))
+    if lat is None or lon is None:
+        return None
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        return None
+    if lat == 0 and lon == 0:
+        return None
+    return {"latitude": round(lat, precision),
+            "longitude": round(lon, precision),
+            "gps_accuracy": max(10, round(111_000 / 10 ** precision)),
+            "last_update": getattr(loc, "lastUpdateTime", None)}
