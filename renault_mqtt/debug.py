@@ -17,7 +17,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from renault_mqtt import config
+from renault_mqtt import config, mqtt
 
 LOG = logging.getLogger("renault_mqtt.debug")
 
@@ -117,7 +117,16 @@ async def dump_api(vehicle):
     """DEBUG: fetch every readable endpoint, redact IDs/secrets, log the lot. Never fatal."""
     secrets = config._config_secrets()
     out = {}
-    for meth in _DEBUG_METHODS:
+    # publish_location: false is documented as "fetches no location ... a zero location footprint".
+    # The dump must honour that too: the poll path guards get_location behind PUBLISH_LOCATION, but
+    # maybe_dump_api is called unconditionally, so without this an opted-out user who switched
+    # debug_dump on would still hit Renault's location endpoint - breaking a promise the docs make
+    # in as many words. mqtt.PUBLISH_LOCATION is the single source of truth (mqtt.configure sets
+    # it); it is None until then, which is falsy, so an unconfigured dump also skips location
+    # rather than defaulting to fetching it.
+    methods = [m for m in _DEBUG_METHODS
+               if m != "get_location" or mqtt.PUBLISH_LOCATION]
+    for meth in methods:
         fn = getattr(vehicle, meth, None)
         if fn is not None:
             await _dump_one(out, meth, lambda _f=fn: _f(), secrets)

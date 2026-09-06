@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from renault_mqtt import config, debug
+from renault_mqtt import config, debug, mqtt
 
 
 @pytest.fixture(autouse=True)
@@ -146,12 +146,49 @@ def test_dump_api_runs_and_redacts(monkeypatch):
     asyncio.run(debug.dump_api(_DumpVehicle()))   # exercises the loop, raw_data + str fallbacks
 
 
-def test_dump_api_includes_location_but_never_its_coordinates(caplog):
+def test_dump_api_skips_location_when_publishing_is_opted_out(monkeypatch, caplog):
+    """publish_location: false is documented as "fetches no location ... a zero location
+    footprint". maybe_dump_api is called unconditionally by the poll loop, so without an explicit
+    check here an opted-out user who enabled debug_dump would still hit Renault's location
+    endpoint. Regression guard for exactly that."""
+    called = []
+
+    class _V(_DumpVehicle):
+        async def get_location(self):
+            called.append(1)
+            return {"gpsLatitude": 51.9473, "lastUpdateTime": "2026-09-02T11:43:14Z"}
+
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", False)
+    with caplog.at_level(logging.WARNING, logger="renault_mqtt.debug"):
+        asyncio.run(debug.dump_api(_V()))
+    assert not called, "location endpoint was queried despite publish_location: false"
+    assert "get_location" not in caplog.text
+    assert "batteryLevel" in caplog.text  # the rest of the dump still runs
+
+
+def test_dump_api_skips_location_when_unconfigured(caplog):
+    """PUBLISH_LOCATION is None until mqtt.configure() runs. None is falsy, so an unconfigured
+    dump skips location rather than defaulting to fetching it — fail safe, not fail open."""
+    assert mqtt.PUBLISH_LOCATION is None or isinstance(mqtt.PUBLISH_LOCATION, bool)
+    called = []
+
+    class _V(_DumpVehicle):
+        async def get_location(self):
+            called.append(1)
+            return {}
+
+    with caplog.at_level(logging.WARNING, logger="renault_mqtt.debug"):
+        asyncio.run(debug.dump_api(_V()))
+    assert not called
+
+
+def test_dump_api_includes_location_but_never_its_coordinates(monkeypatch, caplog):
     """get_location is dumped for its lastUpdateTime/gpsDirection — the fields that diagnose a
     stuck fix — while the coordinates stay masked. It was excluded outright until 2026-09-06 on
     PII grounds; this pins the safety property that made including it acceptable, so a change to
     _DEBUG_REDACT_KEYS cannot quietly start logging the vehicle's position."""
     assert "get_location" in debug._DEBUG_METHODS
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", True)
     with caplog.at_level(logging.WARNING, logger="renault_mqtt.debug"):
         asyncio.run(debug.dump_api(_DumpVehicle()))
     dumped = caplog.text
