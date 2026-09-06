@@ -8,6 +8,7 @@ EXTRA_SPECIALS probe hook is exercised directly. `_DEBUG_STATE` / `EXTRA_SPECIAL
 around every test.
 """
 import asyncio
+import logging
 import types
 
 import pytest
@@ -41,6 +42,11 @@ class _DumpVehicle:
 
     async def get_cockpit(self):
         return "plain-repr-object"                            # neither -> str() fallback
+
+    async def get_location(self):
+        # Shape per the Kamereon location endpoint: coordinates + lastUpdateTime + gpsDirection.
+        return {"gpsLatitude": 51.9473, "gpsLongitude": -0.6274,
+                "lastUpdateTime": "2026-09-02T11:43:14Z", "gpsDirection": 210}
 
 
 # --------------------------------------------------------------------------- #
@@ -138,6 +144,20 @@ def test_dump_one_parses_and_redacts_list_results():
 def test_dump_api_runs_and_redacts(monkeypatch):
     monkeypatch.setenv("TEST_VIN", "SECRET")
     asyncio.run(debug.dump_api(_DumpVehicle()))   # exercises the loop, raw_data + str fallbacks
+
+
+def test_dump_api_includes_location_but_never_its_coordinates(caplog):
+    """get_location is dumped for its lastUpdateTime/gpsDirection — the fields that diagnose a
+    stuck fix — while the coordinates stay masked. It was excluded outright until 2026-09-06 on
+    PII grounds; this pins the safety property that made including it acceptable, so a change to
+    _DEBUG_REDACT_KEYS cannot quietly start logging the vehicle's position."""
+    assert "get_location" in debug._DEBUG_METHODS
+    with caplog.at_level(logging.WARNING, logger="renault_mqtt.debug"):
+        asyncio.run(debug.dump_api(_DumpVehicle()))
+    dumped = caplog.text
+    assert "lastUpdateTime" in dumped and "2026-09-02T11:43:14Z" in dumped  # diagnostic kept
+    assert "gpsDirection" in dumped and "210" in dumped                     # heading kept
+    assert "51.9473" not in dumped and "-0.6274" not in dumped              # position masked
 
 
 def test_dump_api_probes_ranged_endpoints(monkeypatch):
