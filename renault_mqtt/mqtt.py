@@ -163,6 +163,26 @@ def publish_discovery(client, supported_eps, dist_unit):
             conf["icon"] = cat.ICONS[obj]
         if obj in cat.DEFAULT_DISABLED_SENSORS:
             conf["enabled_by_default"] = False
+        if obj in getattr(cat, "DATA_GATED_SENSORS", ()):
+            # This sensor's endpoint can stop answering while the car still advertises it (the
+            # A290's hvac-settings returns 502000 forever), so the poller trips a breaker and
+            # simply stops writing the key. Without this the entity renders as an EMPTY STRING —
+            # indistinguishable from "the car reported nothing" — which is what the add-on's
+            # backlog asked to fix and what three releases of breaker work left behind.
+            #
+            # Availability follows key presence: absent (or empty) means unavailable, so a card
+            # can hide or grey it instead of showing a blank value. `availability_mode: all`
+            # keeps the add-on's own online/offline topic authoritative as well — HA forbids
+            # mixing `availability_topic` with an `availability` list, hence the pop below.
+            key = obj.removeprefix(prefix)
+            conf.pop("availability_topic", None)
+            conf["availability"] = [
+                {"topic": AVAIL_TOPIC},
+                {"topic": STATE_TOPIC,
+                 "value_template": ("{% if value_json." + key + " is defined and value_json."
+                                    + key + " not in ('', none) %}online{% else %}offline{% endif %}")},
+            ]
+            conf["availability_mode"] = "all"
         client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
     for obj, (name, dev_class) in cat.BINARY_SENSORS.items():
         conf = {"name": name, "object_id": obj, "unique_id": obj,
