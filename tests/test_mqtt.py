@@ -25,12 +25,14 @@ _FAKE_CATALOG = types.SimpleNamespace(
         "tst_pressure": ("Pressure", "pressure", "bar", None),      # optional -> skipped unsupported
         "tst_plain": ("Plain", None, None, None),                   # no dev_class/unit/state_class
         "tst_disabled": ("Disabled", None, None, None),             # default-disabled + icon
+        "tst_gated": ("Gated", None, None, None),                   # availability follows its key
     },
     BINARY_SENSORS={"tst_plug": ("Plug", "plug"), "tst_flap": ("Flap", None)},
     ICONS={"tst_disabled": "mdi:foo", "tst_plug": "mdi:plug"},
     OPTIONAL_ENDPOINTS={"pressure": ["tst_pressure"]},
     RETIRED_SENSORS=["tst_old"],
     DEFAULT_DISABLED_SENSORS={"tst_disabled"},
+    DATA_GATED_SENSORS={"tst_gated"},
     ACTION_BUTTONS={
         "tst_wake": ("Wake", "mdi:bell", "wake"),                        # supported
         "tst_refresh": ("Refresh", "mdi:map", "actions/refresh-location"),  # gated on location
@@ -362,3 +364,49 @@ def test_on_disconnect_warns_only_on_error(caplog):
         assert not caplog.records
         mqtt._on_disconnect(None, None, None, 1)
         assert any("disconnected" in r.message for r in caplog.records)
+
+
+def test_data_gated_sensor_availability_follows_its_key():
+    """A sensor whose endpoint can stop answering must go UNAVAILABLE, not blank.
+
+    The A290's hvac-settings is advertised as supported and then returns 502000 forever, so the
+    poller trips a breaker and stops writing the key. Before this, the two climate sensors it
+    feeds rendered as EMPTY STRINGS — indistinguishable from "the car reported nothing" — which
+    is what the add-on backlog asked to fix and what three releases of breaker work left behind.
+    """
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    conf = json.loads(c.pub["homeassistant/sensor/test_node/tst_gated/config"])
+
+    # HA forbids mixing availability_topic with an availability list; the list must replace it.
+    assert "availability_topic" not in conf
+    assert conf["availability_mode"] == "all"
+
+    topics = [a["topic"] for a in conf["availability"]]
+    assert "test_node/availability" in topics      # the add-on's own online/offline still counts
+    assert "test_node/state" in topics             # ...AND the key-presence test
+
+    tmpl = next(a["value_template"] for a in conf["availability"] if a["topic"] == "test_node/state")
+    assert "value_json.gated is defined" in tmpl   # prefix stripped, same as value_template
+    assert "online" in tmpl and "offline" in tmpl
+
+    # An ordinary sensor is untouched — this must not silently change every entity's availability.
+    plain = json.loads(c.pub["homeassistant/sensor/test_node/tst_plain/config"])
+    assert plain["availability_topic"] == "test_node/availability"
+    assert "availability" not in plain
+
+
+def test_data_gating_is_optional_for_a_catalog_that_omits_it():
+    """The r5 catalog may not declare DATA_GATED_SENSORS; discovery must not blow up."""
+    import types
+    cat = mqtt._CAT
+    stripped = types.SimpleNamespace(**{k: v for k, v in vars(cat).items()
+                                        if k != "DATA_GATED_SENSORS"})
+    mqtt._CAT = stripped
+    try:
+        c = StubClient()
+        mqtt.publish_discovery(c, _ALL_EPS, "km")
+        conf = json.loads(c.pub["homeassistant/sensor/test_node/tst_gated/config"])
+        assert conf["availability_topic"] == "test_node/availability"   # falls back cleanly
+    finally:
+        mqtt._CAT = cat
