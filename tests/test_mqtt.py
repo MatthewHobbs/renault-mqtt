@@ -210,16 +210,49 @@ def test_buttons_gated_on_support_and_location(monkeypatch):
     base = "homeassistant/button/test_node"
     c = StubClient()
     monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", True)
+    monkeypatch.setattr(mqtt, "ENABLE_REFRESH_LOCATION", True)
     mqtt.publish_discovery(c, _ALL_EPS, "km")
     wake = json.loads(c.pub[f"{base}/wake/config"])
     assert wake["command_topic"] == "test_node/cmd/wake" and wake["object_id"] == "tst_wake"
-    assert json.loads(c.pub[f"{base}/refresh/config"])["name"] == "Refresh"   # location on -> shown
+    assert json.loads(c.pub[f"{base}/refresh/config"])["name"] == "Refresh"   # both on -> shown
     assert c.pub[f"{base}/forbidden/config"] == ""                            # unsupported -> cleared
     # location off suppresses the refresh-location button too
     c = StubClient()
     monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", False)
     mqtt.publish_discovery(c, _ALL_EPS, "km")
     assert c.pub[f"{base}/refresh/config"] == ""
+
+
+@pytest.mark.parametrize("publish_location,enable_refresh,shown", [
+    (True,  True,  True),    # opted in, location on -> the only combination that publishes it
+    (True,  False, False),   # the shipped default
+    (False, True,  False),   # opting in cannot override the location opt-out
+    (False, False, False),
+])
+def test_refresh_location_button_is_opt_in(monkeypatch, publish_location, enable_refresh, shown):
+    """The refresh-location button needs BOTH flags. It is destructive on a parked car: the press
+    replaces the car's committed position with a 'no fix' answer on a CURRENT timestamp, and only a
+    completed journey restores it (hacf-fr/renault-api#2250 §3). Withholding it must also CLEAR it,
+    or an install that already has the entity keeps a working button after the upgrade."""
+    topic = "homeassistant/button/test_node/refresh/config"
+    c = StubClient()
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", publish_location)
+    monkeypatch.setattr(mqtt, "ENABLE_REFRESH_LOCATION", enable_refresh)
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+
+    if shown:
+        assert json.loads(c.pub[topic])["command_topic"] == "test_node/cmd/refresh"
+    else:
+        # A zero-length RETAINED payload is what makes HA delete the entity. An absent publish would
+        # leave the pre-upgrade button in place, so assert the write itself, not just the value.
+        assert c.writes(topic) == [("", True)]
+
+
+def test_refresh_location_defaults_to_off_when_unset():
+    """_opt_flag falls back to its default when the env var is unset/''/'null' — the state of an
+    upgraded install whose options have not been re-rendered. That must resolve to OFF, so a
+    destructive action is never inherited silently by an upgrade."""
+    assert mqtt.ENABLE_REFRESH_LOCATION is False   # default when TEST_ENABLE_REFRESH_LOCATION unset
 
 
 def test_button_cmd_override_remaps_command_topic_only(monkeypatch):
