@@ -55,6 +55,23 @@ CMD_PREFIX = None
 # truth — the add-on reads it as mqtt.PUBLISH_LOCATION. Set by configure() (needs the env prefix).
 PUBLISH_LOCATION = None
 
+# The refresh-location button is opt-IN (default OFF), independently of PUBLISH_LOCATION above.
+# Invoking actions/refresh-location on a parked car asks it for a fix it usually cannot obtain, and
+# the "no position" answer then REPLACES the last committed position in Kamereon on a *current*
+# timestamp. Only a completed journey restores it — which, for a car used as needed rather than
+# daily, may be weeks. Established on a real A5E1AE and reported upstream as
+# hacf-fr/renault-api#2250 §3: a valid fix survived days parked, the press replaced it, the next
+# journey restored it.
+#
+# Note this cannot be fixed by filtering the output. parse.location_attrs already rejects the
+# 91/181 sentinel, which protects OUR entity — but the car's own record is still overwritten, so
+# Renault's app shows no position while Home Assistant looks healthy. That made the damage
+# invisible rather than absent, which is why the button itself is withheld instead.
+#
+# Read here so both add-ons inherit one default; the add-on also reads it as
+# mqtt.ENABLE_REFRESH_LOCATION to reject the inbound command, not just hide the button.
+ENABLE_REFRESH_LOCATION = None
+
 # Injected by the add-on at startup (see module docstring). _LOOP is the running event loop an
 # inbound command is scheduled onto; _COMMAND_HANDLER is the add-on's async run_command(cmd, payload).
 _LOOP = None
@@ -67,9 +84,10 @@ _MQTT_CTX = {"supported": None, "dist_unit": None}
 
 def configure(catalog):
     """Inject the add-on's catalog + derive the per-model MQTT identity. Run once at startup, AFTER
-    config.ENV_PREFIX is injected (PUBLISH_LOCATION is read here under that prefix)."""
+    config.ENV_PREFIX is injected (the option flags are read here under that prefix)."""
     global _CAT, NODE, DEVICE, _KEEPALIVE, _CLIENT_ID, _DIST_UNIT_OBJS
     global STATE_TOPIC, ATTR_TOPIC, TRACKER_STATE_TOPIC, AVAIL_TOPIC, CMD_PREFIX, PUBLISH_LOCATION
+    global ENABLE_REFRESH_LOCATION
     _CAT = catalog
     NODE = catalog.NODE
     DEVICE = catalog.DEVICE
@@ -82,6 +100,9 @@ def configure(catalog):
     AVAIL_TOPIC = f"{NODE}/availability"
     CMD_PREFIX = f"{NODE}/cmd/"
     PUBLISH_LOCATION = _opt_flag(config.ENV_PREFIX + "PUBLISH_LOCATION", True)
+    # Default False: an upgraded install that has not yet re-rendered its options gets the button
+    # withheld rather than kept, which is the safe direction for a destructive action.
+    ENABLE_REFRESH_LOCATION = _opt_flag(config.ENV_PREFIX + "ENABLE_REFRESH_LOCATION", False)
 
 
 def _on_message(client, userdata, msg):
@@ -232,8 +253,12 @@ def publish_discovery(client, supported_eps, dist_unit):
         short = obj.removeprefix(prefix)
         cmd = cmd_overrides.get(obj, short)
         topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{short}/config"
-        # Suppress the location-refresh button too when the user has opted out of location.
-        if ep in supported_eps and not (ep == cat.REFRESH_LOCATION_EP and not PUBLISH_LOCATION):
+        # The refresh-location button is withheld unless the user opted in AND location publishing
+        # is on. The else-branch below publishes a zero-length retained payload, which is what makes
+        # Home Assistant delete an entity an existing install already has — so an upgrade removes
+        # the button rather than leaving a dead one behind.
+        refresh_ok = PUBLISH_LOCATION and ENABLE_REFRESH_LOCATION
+        if ep in supported_eps and not (ep == cat.REFRESH_LOCATION_EP and not refresh_ok):
             conf = {"name": name, "object_id": obj, "unique_id": obj,
                     "command_topic": f"{CMD_PREFIX}{cmd}", "availability_topic": AVAIL_TOPIC,
                     "icon": icon, "device": DEVICE}
@@ -263,6 +288,8 @@ def publish_discovery(client, supported_eps, dist_unit):
         else:
             client.publish(topic, "", retain=True)
     LOG.info("Published discovery: %d sensors (%d unsupported cleared), %d binary_sensors, "
-             "location=%s, buttons=%s, numbers=%s",
+             "location=%s, refresh_location=%s, buttons=%s, numbers=%s",
              published, len(skip), len(cat.BINARY_SENSORS),
-             "on" if PUBLISH_LOCATION else "off (cleared)", buttons or "none", numbers or "none")
+             "on" if PUBLISH_LOCATION else "off (cleared)",
+             "on" if PUBLISH_LOCATION and ENABLE_REFRESH_LOCATION else "off (cleared)",
+             buttons or "none", numbers or "none")
