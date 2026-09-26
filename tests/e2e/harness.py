@@ -100,7 +100,11 @@ class Run(gate.Gate):
         a = self.args
         log(f"stack up: HA {a.ha_version}, http 127.0.0.1:{a.http_port}, mqtt 127.0.0.1:{a.mqtt_port}")
         stack.up(a.ha_version, a.http_port, a.mqtt_port)
-        if "d5" in a.scenarios:
+        # d3/d4/d5 share one HA restart (see the "offline" group in run()) and scenario_offline()
+        # always reports d5's rows as part of it, so naming d3 or d4 alone must arm the watcher
+        # too -- otherwise a d5 row that was never watched for reports NONE against an expected
+        # SEEN, a false failure with nothing wrong in the core.
+        if a.scenarios & {"d3", "d4", "d5"}:
             for attempt in range(20):      # Mosquitto may not be listening the instant it starts
                 try:
                     self.watch_status()
