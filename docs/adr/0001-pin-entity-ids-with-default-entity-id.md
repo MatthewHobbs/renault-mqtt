@@ -30,7 +30,7 @@ Decisions the owner confirmed on 2026-09-26:
 | # | Step | Owner | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | 1 | `publish_discovery` sends `default_entity_id` = name-derived id on all five domains; keeps `object_id`; `configure()` rejects a name whose id the core cannot derive; tests pin the slug rule | renault-mqtt | Open | Branch `feat-default-entity-id`; PR not yet opened |
-| 2 | **End-to-end experiment at HA 2026.8.1 and at current stable.** Scenarios: (a) the pin works with the device in an area; (b) a plain install is unchanged, for the real a290 and r5 catalogs. **PENDING; gates the merge of row 1.** | renault-mqtt (e2e harness) | Open | **TODO: results not yet run. Record the HA versions, the ids read from the registry, and what a failing result would have looked like. Do not fill from expectation.** |
+| 2 | **End-to-end experiment at HA 2026.8.1 and at current stable.** Scenarios: (a) the pin works with the device in an area; (b) a plain install is unchanged, for the real a290 and r5 catalogs. Gates the merge of row 1. | renault-mqtt (e2e harness) | Done | 2026-09-26, HA 2026.8.1 and 2026.9.3 (stable per stable.json), core `fb85a83`: see "End-to-end results" below |
 | 3 | Core release: `__version__` bump in its own PR; the release workflow tags it | renault-mqtt | Open | |
 | 4 | a290-ha-addon: `CORE_REF` bump, conformance test reads `default_entity_id`, patch release, container boot | a290-ha-addon | Open | |
 | 5 | r5-ha-addon: the same, after row 4 | r5-ha-addon | Open | |
@@ -129,10 +129,10 @@ Copied verbatim from RFC 0005.
 
 **Open items**
 
-- **Untested:** whether re-discovery *with* `default_entity_id` renames an already-registered
-  prefixed entity. HA's code (`_init_entity_registry` in `homeassistant/components/mqtt/entity.py`)
-  suggests it does so only for a deleted registry entry.
-- **The tombstone-while-HA-offline gap:** a separate RFC is coming.
+- **Re-discovery does not repair an already-prefixed entity** (scenario g below). Only the
+  deleted-registry-entry path, which HA's code (`_init_entity_registry` in
+  `homeassistant/components/mqtt/entity.py`) shows renaming, was not exercised.
+- **The tombstone-while-HA-offline gap** (scenario d2 below): a separate RFC is coming.
 
 ## Verification (2026-09-26)
 
@@ -146,6 +146,28 @@ Copied verbatim from RFC 0005.
 - **What this cannot establish:** that HA itself derives these ids. The comparison is with the
   library HA pins, not with a running HA; the registry path, area prefixing and `_2` collisions
   are not exercised. Row 2 is the check that settles that.
+
+### End-to-end results (row 2)
+
+Harness `tests/e2e` (`just e2e`), branch `test-e2e-ha-harness` at `81ec3d4`: Mosquitto plus a fresh
+HA container, the MQTT integration set up through its config flow, the core's own recorded
+publishes replayed in order, and ids read from HA's registry over websocket. It ran at
+**HA 2026.8.1 and 2026.9.3**, as `get_config` reported. The cores tested were main `d237946`,
+this branch `fb85a83`, the retirement branch `d99dda2`, and a scratch merge of the two. Each
+scenario's device is in an area named "Garage" unless stated. Results were identical on both
+versions.
+
+| Scenario | Result | Could have been | Control |
+| --- | --- | --- | --- |
+| b: new entity, no pin | `sensor.garage_e2e_b_car_extra` (and the same for binary_sensor, button and number); reproduces on main | no prefix | a sibling registered before the area was set has none |
+| c: new entity with the pin | exactly `default_entity_id` (`sensor.e2e_c_car_extra` and the same for the other three domains) | `garage_…` or `_2` | b is the same sequence without the pin |
+| g: already `garage_…`, re-discovered with the pin | left as is, 15 s after the update and after a restart | renamed | HA logged `Updating component` for each |
+| f: plain install, **real** catalogs, pin stripped so HA derives each id itself | 57 of 57 a290 and 58 of 58 r5 equal the id this branch would pin | a mismatch | slug rules known to be wrong (no lower-casing; `-` as the separator) give 115 of 115 mismatches against the same HA ids |
+
+What f does **not** cover: the real names use only letters, digits and spaces, so it confirms
+HA's derivation for those characters only. Even a naive "lower-case, spaces to `_`" rule passes
+it. The punctuation rules (apostrophe, digit comma) rest on python-slugify 9.0.0 and the unit
+tests, not on a running HA. HA 2026.7.1 and the add-ons' own images were not run.
 
 ## References
 
