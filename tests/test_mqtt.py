@@ -243,9 +243,11 @@ def test_refresh_location_button_is_opt_in(monkeypatch, publish_location, enable
     if shown:
         assert json.loads(c.pub[topic])["command_topic"] == "test_node/cmd/refresh"
     else:
-        # A zero-length RETAINED payload is what makes HA delete the entity. An absent publish would
-        # leave the pre-upgrade button in place, so assert the write itself, not just the value.
-        assert c.writes(topic) == [("", True)]
+        # A zero-length RETAINED payload is what makes HA delete the entity (preceded, since RFC
+        # 0009/C2, by an unretained minimal disabled config -- see _assert_minimal_then_tombstone).
+        # An absent publish would leave the pre-upgrade button in place, so assert the writes
+        # themselves, not just the final value.
+        assert c.writes(topic)[-1] == ("", True)
 
 
 def test_refresh_location_defaults_to_off_when_unset():
@@ -618,8 +620,11 @@ def test_retired_id_is_tombstoned_on_the_topic_it_was_published_on(domain, table
     mqtt.configure(_retire(table, attr, obj))
     c = StubClient()
     mqtt.publish_discovery(c, _ALL_EPS, "km")
-    # Exactly one zero-length RETAINED write: that is what makes HA delete the entity.
-    assert c.writes(live) == [("", True)]
+    # The final write is a zero-length RETAINED payload: that is what makes HA delete the entity.
+    # (Since RFC 0009/C2, it is preceded by an unretained minimal disabled config -- see
+    # _assert_minimal_then_tombstone -- which is what lets the tombstone reach an id HA's current
+    # run never discovered, e.g. after an offline restart.)
+    assert c.writes(live)[-1] == ("", True)
 
 
 def test_retired_tombstones_precede_every_live_config():
@@ -628,12 +633,16 @@ def test_retired_tombstones_precede_every_live_config():
     mqtt.configure(_catalog(**{attr: [f"tst_gone_{domain}"] for domain, _, attr, _ in _RETIRABLE}))
     c = StubClient()
     mqtt.publish_discovery(c, _ALL_EPS, "km")
-    tombs = [c.index_of(t, "") for t in (
+    tomb_topics = {
         "homeassistant/sensor/test_node/tst_gone_sensor/config",
         "homeassistant/binary_sensor/test_node/tst_gone_binary_sensor/config",
         "homeassistant/button/test_node/gone_button/config",
-        "homeassistant/number/test_node/gone_number/config")]
-    first_live = next(i for i, (t, p, _) in enumerate(c.log) if t.startswith("homeassistant/") and p)
+        "homeassistant/number/test_node/gone_number/config"}
+    tombs = [c.index_of(t, "") for t in tomb_topics]
+    # A retirement's own minimal config is also a non-empty write on its topic, so exclude those
+    # topics when looking for the first REAL live config.
+    first_live = next(i for i, (t, p, _) in enumerate(c.log)
+                       if t.startswith("homeassistant/") and p and t not in tomb_topics)
     assert max(tombs) < first_live
 
 
@@ -656,7 +665,7 @@ def test_an_id_retired_in_one_domain_may_be_live_in_another():
     mqtt.configure(_catalog(RETIRED_SENSORS=["tst_soc_min"]))
     c = StubClient()
     mqtt.publish_discovery(c, _ALL_EPS, "km")
-    assert c.writes("homeassistant/sensor/test_node/tst_soc_min/config") == [("", True)]
+    assert c.writes("homeassistant/sensor/test_node/tst_soc_min/config")[-1] == ("", True)
     assert json.loads(c.pub["homeassistant/number/test_node/soc_min/config"])["object_id"] == "tst_soc_min"
 
 

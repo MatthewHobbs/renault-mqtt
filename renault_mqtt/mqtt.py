@@ -157,7 +157,18 @@ def configure(catalog):
     ENABLE_REFRESH_LOCATION = _opt_flag(config.ENV_PREFIX + "ENABLE_REFRESH_LOCATION", False)
 
 
+_HA_BIRTH_TOPIC = "homeassistant/status"
+
+
 def _on_message(client, userdata, msg):
+    if msg.topic == _HA_BIRTH_TOPIC:
+        # HA's documented discovery trigger (its MQTT docs tell publishers to use this), separate
+        # from the add-on's own reconnect below: HA sends this on every broker reconnect too, not
+        # only at its own start, and it is not retained, so a subscriber that joins late needs the
+        # add-on's own re-publish-on-connect for that case instead.
+        if msg.payload == b"online" and _MQTT_CTX["supported"] is not None:
+            publish_discovery(client, _MQTT_CTX["supported"], _MQTT_CTX["dist_unit"])
+        return
     if _LOOP is not None and _COMMAND_HANDLER is not None and msg.topic.startswith(CMD_PREFIX):
         cmd = msg.topic[len(CMD_PREFIX):]
         payload = msg.payload.decode(errors="replace") if msg.payload else ""
@@ -174,6 +185,7 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
         LOG.warning("MQTT connect refused: %s", reason_code)
         return
     client.subscribe(f"{CMD_PREFIX}#")
+    client.subscribe(_HA_BIRTH_TOPIC)
     if _MQTT_CTX["supported"] is not None:
         publish_discovery(client, _MQTT_CTX["supported"], _MQTT_CTX["dist_unit"])
     client.publish(AVAIL_TOPIC, "online", retain=True)
@@ -200,13 +212,29 @@ def mqtt_connect():
     return client
 
 
+def _tombstone(client, topic, unique_id, topic_key, topic_value):
+    """RFC 0009 option C2: an unretained minimal config -- unique_id, device, the domain's one
+    required topic, and enabled_by_default: false -- published right before the ordinary empty
+    retained payload. HA only acts on an empty payload for an id it discovered in its current
+    run, so a plain tombstone cannot remove an orphan HA never saw (e.g. after an offline
+    restart). The gate measured this minimal config, alone, as HA briefly creating and removing
+    the id: doing that ENABLED wrote 2 recorder history rows per id per cycle for an id the
+    install never had, and could not remove an id the install had disabled; disabled fixes both,
+    at no measured history/logbook cost, on HA 2026.8.1 and 2026.9.3."""
+    minimal = {"unique_id": unique_id, "device": DEVICE, "enabled_by_default": False,
+               topic_key: topic_value}
+    client.publish(topic, json.dumps(minimal), retain=False)
+    client.publish(topic, "", retain=True)
+
+
 def publish_discovery(client, supported_eps, dist_unit):
     cat = _CAT
     prefix = cat.OBJ_PREFIX
     skip = {obj for ep, objs in cat.OPTIONAL_ENDPOINTS.items()
             if ep not in supported_eps for obj in objs}
     for obj in set(skip) | set(cat.RETIRED_SENSORS):
-        client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", "", retain=True)
+        _tombstone(client, f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", obj,
+                   "state_topic", STATE_TOPIC)
     # Name what was withheld and why. A user reporting "entity X is missing" otherwise has to
     # infer it from a count, and a retired object_id looks identical to an unsupported one.
     if skip:
@@ -218,7 +246,11 @@ def publish_discovery(client, supported_eps, dist_unit):
         retired = getattr(cat, attr, ())
         for obj in retired:
             seg = _topic_segment(domain, obj, prefix)
-            client.publish(f"{DISCOVERY_PREFIX}/{domain}/{NODE}/{seg}/config", "", retain=True)
+            topic = f"{DISCOVERY_PREFIX}/{domain}/{NODE}/{seg}/config"
+            if domain == "button":
+                _tombstone(client, topic, obj, "command_topic", f"{CMD_PREFIX}{seg}")
+            else:
+                _tombstone(client, topic, obj, "state_topic", STATE_TOPIC)
         if retired:
             LOG.debug("Retired %s configs cleared: %s", domain, sorted(retired))
     published = 0
@@ -331,7 +363,7 @@ def publish_discovery(client, supported_eps, dist_unit):
             client.publish(topic, json.dumps(conf), retain=True)
             buttons.append(short)
         else:
-            client.publish(topic, "", retain=True)
+            _tombstone(client, topic, obj, "command_topic", f"{CMD_PREFIX}{cmd}")
     numbers = []
     soc_ok = cat.SOC_ENDPOINT in supported_eps
     if not soc_ok:
@@ -353,7 +385,7 @@ def publish_discovery(client, supported_eps, dist_unit):
             client.publish(topic, json.dumps(conf), retain=True)
             numbers.append(short)
         else:
-            client.publish(topic, "", retain=True)
+            _tombstone(client, topic, obj, "state_topic", STATE_TOPIC)
     LOG.info("Published discovery: %d sensors (%d unsupported cleared), %d binary_sensors, "
              "location=%s, refresh_location=%s, buttons=%s, numbers=%s",
              published, len(skip), len(cat.BINARY_SENSORS),
