@@ -139,8 +139,11 @@ orphan on its own. It stays `unavailable` until the user deletes it.
 
 **Open items**
 
-- A user who has changed HA's birth topic or disabled the birth message gets the add-on's own
-  reconnect re-publish only, not the birth-triggered one.
+- A user who has changed HA's birth **topic or payload**, or disabled the birth message entirely
+  (all three are supported HA configuration), gets the add-on's own reconnect re-publish only, not
+  the birth-triggered one. This was accepted as a risk in RFC 0009 itself ("Other risks"), not
+  discovered by this ADR's review; adding configurability for it is a separate decision, not a fix
+  to this one.
 - HA 2026.7.1 and earlier were not tested; the add-ons' declared minimum is 2026.8.1.
 - **The device_tracker's location opt-out uses the same C2 sequence by code and unit test only.**
   Unlike the four `_RETIRABLE` domains, it was not run through the e2e harness's offline-tombstone
@@ -199,8 +202,16 @@ requires reviewing the SHA that merges:
    its unit test rest on the same mechanism the other four domains already proved, not on a fresh
    measurement of this specific path.
 
-Both findings were in code this branch itself introduced, not pre-existing debt. No finding was
-dismissed; both were fixed and re-verified before this ADR was accepted.
+3. **Third pass**, against the fixed head: Codex found the birth-message subscription is hard-coded
+   to the default topic and payload, and HA supports customizing (or disabling) both, so such a
+   user only gets the add-on's own reconnect recovery, not the birth-triggered one. This is real,
+   but it is not a new defect: RFC 0009's own "Other risks" already named the topic case as an
+   accepted limitation. **Dismissed as a new finding, but the ADR's wording was tightened** to
+   cover payload customization too, which the RFC's phrasing had missed. Adding configurability
+   for a non-default birth topic/payload is a separate decision, not a fix to this one.
+
+The first two findings were in code this branch itself introduced, not pre-existing debt, and were
+fixed and re-verified. The third restates a risk already accepted at the RFC stage.
 
 ## References
 
