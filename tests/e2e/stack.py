@@ -21,7 +21,10 @@ def name_stack(http_port):
     base = f"{PREFIX}-{http_port}"
     NETWORK, BROKER, HA = f"{base}-net", f"{base}-mqtt", f"{base}-ha"
 
-MOSQUITTO_CONF = "listener 1883 0.0.0.0\nallow_anonymous true\npersistence false\n"
+
+# Persistence on, as the Mosquitto add-on ships it: a broker restart (d2) must keep retained configs.
+MOSQUITTO_CONF = ("listener 1883 0.0.0.0\nallow_anonymous true\npersistence true\n"
+                  "persistence_location /mosquitto/data/\n")
 
 # mqtt debug is what the harness greps for "Updating component" / "Removing component": the only
 # evidence that a discovery message which changed nothing visible was processed at all.
@@ -81,6 +84,20 @@ def stop_ha():
 
 def start_ha():
     _docker("start", HA)
+
+
+def stop_broker():
+    # SIGTERM is what makes Mosquitto write its persistence file.
+    _docker("stop", "-t", "30", BROKER)
+
+
+def start_broker():
+    _docker("start", BROKER)
+
+
+def ha_file(path):
+    """Read a file inside the HA container (read-only; the registries are never written this way)."""
+    return _docker("exec", HA, "cat", path).stdout
 
 
 def ha_logs(since=None):

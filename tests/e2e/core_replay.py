@@ -51,10 +51,15 @@ class Recorder:
 
     def __init__(self):
         self.log = []
+        self.subs = []
 
     def publish(self, topic, payload=None, retain=False, qos=0):
         self.log.append({"topic": topic, "payload": "" if payload is None else payload,
                          "retain": retain, "qos": qos})
+
+    def subscribe(self, topic, *args, **kwargs):
+        topics = topic if isinstance(topic, list) else [topic]
+        self.subs += [t if isinstance(t, str) else t[0] for t in topics]
 
 
 def all_endpoints(cat):
@@ -119,11 +124,12 @@ def config_topic_parts(topic):
 
 
 def configs(records):
-    """{unique_id: (domain, record, parsed payload)} for every non-empty discovery config."""
+    """{unique_id: (domain, record, parsed payload)} for every retained, non-empty discovery config.
+    An unretained config is a resurrect ahead of a tombstone, not an entity meant to exist."""
     out = {}
     for r in records:
         tp = config_topic_parts(r["topic"])
-        if tp and r["payload"]:
+        if tp and r["payload"] and r["retain"]:
             conf = json.loads(r["payload"])
             out[conf["unique_id"]] = (tp[0], r, conf)
     return out
@@ -146,7 +152,53 @@ def capabilities(core):
     recs = record(core, probe)
     dead = {config_topic_parts(r["topic"])[0] for r in tombstones(recs) if "probe" in r["topic"]}
     has_dei = any("default_entity_id" in conf for _, _, conf in configs(recs).values())
-    return {"default_entity_id": has_dei, "retire": {c: c in dead for c in CLASSES}}
+    resurrect = len(resurrected(recs)) == len(tombstones(recs)) > 0
+    return {"default_entity_id": has_dei, "retire": {c: c in dead for c in CLASSES},
+            "resurrect": resurrect, "birth": birth_republishes(core, probe)}
+
+
+def resurrected(records):
+    """Tombstones immediately preceded by an unretained config on the same topic."""
+    return [b for a, b in zip(records, records[1:], strict=False)
+            if config_topic_parts(b["topic"]) and b["payload"] == "" and b["retain"]
+            and a["topic"] == b["topic"] and a["payload"] and not a["retain"]]
+
+
+BIRTH_TOPIC = f"{DISCOVERY_PREFIX}/status"
+
+
+def birth_republishes(core, cat):
+    """Does the core subscribe to HA's birth topic on connect, and re-publish discovery when
+    `online` arrives there? Driven through its real callbacks, not read from its source."""
+    m = core.mqtt
+    saved = dict(m._MQTT_CTX)
+    try:
+        m._MQTT_CTX.update(supported=all_endpoints(cat), dist_unit="km")
+        rec = Recorder()
+        m._on_connect(rec, None, None, 0)
+        before = len(rec.log)
+        m._on_message(rec, None, types.SimpleNamespace(topic=BIRTH_TOPIC, payload=b"online"))
+        return BIRTH_TOPIC in rec.subs and any(config_topic_parts(r["topic"]) for r in rec.log[before:])
+    finally:
+        m._MQTT_CTX.clear()
+        m._MQTT_CTX.update(saved)
+
+
+# The one key each domain cannot be configured without.
+REQUIRED_TOPIC = {"sensor": "state_topic", "binary_sensor": "state_topic", "button": "command_topic",
+                  "number": "command_topic"}
+
+
+def cycle(rec, conf, label, disabled=False):
+    """[minimal config UNRETAINED, empty RETAINED] on `rec`'s topic: option C's sequence, built by
+    the harness, so both records carry `label`. `disabled` adds enabled_by_default: false."""
+    domain = config_topic_parts(rec["topic"])[0]
+    minimal = {"unique_id": conf["unique_id"], "device": conf["device"],
+               REQUIRED_TOPIC[domain]: conf[REQUIRED_TOPIC[domain]]}
+    if disabled:
+        minimal["enabled_by_default"] = False
+    return [{"topic": rec["topic"], "payload": json.dumps(minimal), "retain": False, "qos": 0, "edited": label},
+            {"topic": rec["topic"], "payload": "", "retain": True, "qos": 0, "edited": label}]
 
 
 # ---------------------------------------------------------------------- per-scenario isolation
@@ -234,13 +286,22 @@ class Broker:
         self.client.loop_start()
 
     def replay(self, records):
-        """Publish in recorded order. retain is the core's own flag (always True for these), qos
-        the core's own (the default 0), so the wire sequence is what production would send."""
+        """Publish in recorded order with the core's own retain flag and qos, so the wire sequence
+        is what production would send."""
         for r in records:
-            if not r["retain"]:
-                raise AssertionError(f"core published {r['topic']} unretained; replay would diverge")
-            info = self.client.publish(r["topic"], r["payload"], qos=r["qos"], retain=True)
+            info = self.client.publish(r["topic"], r["payload"], qos=r["qos"], retain=r["retain"])
             info.wait_for_publish(timeout=10)
+
+    def retained_when_up(self, pattern, timeout=30):
+        """retained(), once a restarted broker accepts connections again."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self.retained(pattern)
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.5)
 
     def retained(self, pattern, wait=3.0):
         """Snapshot what the broker would hand a NEW subscriber on `pattern` (retained only)."""
@@ -265,3 +326,86 @@ class Broker:
     def close(self):
         self.client.loop_stop()
         self.client.disconnect()
+
+
+class Watcher:
+    """Records every message on `topics`, with the PUBLISHER's retain flag.
+
+    A plain subscriber cannot answer "was it published retained?": the broker clears the flag on
+    live delivery, so every reading would be False. MQTT 5 retain-as-published keeps it, and
+    probe() shows the instrument reporting both values before any reading counts."""
+
+    PROBE = "rmqtt-e2e/probe"
+
+    def __init__(self, port, topics):
+        self.msgs = []
+        self._lock = threading.Lock()
+        self._subscribed = threading.Event()
+        opts = paho_mqtt.SubscribeOptions(qos=0, retainAsPublished=True)
+        self._topics = [(t, opts) for t in [*topics, self.PROBE]]
+        self.client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION2,
+                                       client_id=f"rmqtt-e2e-watch-{time.time_ns()}",
+                                       protocol=paho_mqtt.MQTTv5)
+        self.client.on_connect = lambda c, *_: c.subscribe(self._topics)
+        self.client.on_subscribe = lambda *_: self._subscribed.set()
+        self.client.on_message = self._on_message
+        self.client.connect("127.0.0.1", port)
+        self.client.loop_start()
+        if not self._subscribed.wait(10):
+            raise RuntimeError("watcher never subscribed")
+
+    def _on_message(self, _c, _u, msg):
+        with self._lock:
+            self.msgs.append({"t": time.monotonic(), "wall": time.time(), "topic": msg.topic,
+                              "payload": msg.payload.decode(errors="replace"), "retain": bool(msg.retain)})
+
+    def probe(self):
+        """Publish one retained and one unretained message; return the flags the watcher saw."""
+        for payload, retain in (("probe-retained", True), ("probe-plain", False)):
+            self.client.publish(self.PROBE, payload, retain=retain).wait_for_publish(timeout=10)
+        self.client.publish(self.PROBE, "", retain=True).wait_for_publish(timeout=10)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            seen = {m["payload"]: m["retain"] for m in self.on(self.PROBE)}
+            if "probe-retained" in seen and "probe-plain" in seen:
+                return seen
+            time.sleep(0.1)
+        return {m["payload"]: m["retain"] for m in self.on(self.PROBE)}
+
+    def on(self, topic, after=None):
+        with self._lock:
+            return [dict(m) for m in self.msgs if m["topic"] == topic and (after is None or m["t"] >= after)]
+
+    def wait_for(self, topic, payload, after, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for m in self.on(topic, after):
+                if m["payload"] == payload:
+                    return m
+            time.sleep(0.2)
+        return None
+
+    def close(self):
+        self.client.loop_stop()
+        self.client.disconnect()
+
+
+class LiveCore:
+    """The core's own MQTT client, started as both add-ons' main.py starts it: _MQTT_CTX set,
+    mqtt_connect(), then an explicit publish_discovery. Its callbacks read module state, so
+    nothing may call record() or configure() while one is running."""
+
+    def __init__(self, core, cat, port, supported, env=None):
+        for k, v in {"MQTT_HOST": "127.0.0.1", "MQTT_PORT": str(port), "MQTT_USER": "", **(env or {})}.items():
+            os.environ[k] = v
+        core.config.ENV_PREFIX = cat.ENV_PREFIX
+        core.mqtt.configure(cat)
+        core.mqtt._MQTT_CTX.update(supported=set(supported), dist_unit="km")
+        self.mqtt = core.mqtt
+        self.client = core.mqtt.mqtt_connect()
+        core.mqtt.publish_discovery(self.client, set(supported), "km")
+
+    def stop(self):
+        self.client.disconnect()
+        self.client.loop_stop()
+        self.mqtt._MQTT_CTX.update(supported=None, dist_unit=None)
