@@ -330,17 +330,20 @@ def publish_discovery(client, supported_eps, dist_unit):
     # Steps 1 and 3 are not interchangeable: an empty payload is ignored by HA and cannot reset,
     # and a retained reset payload would itself become the thing a future subscriber inherits.
     client.publish(TRACKER_STATE_TOPIC, TRACKER_PAYLOAD_RESET, retain=True)
+    loc_id = f"{prefix}car_location"
     if PUBLISH_LOCATION:
-        loc_id = f"{prefix}car_location"
         tracker = {"name": _TRACKER_NAME, "object_id": loc_id, "unique_id": loc_id,
                    "default_entity_id": _default_entity_id("device_tracker", _TRACKER_NAME),
                    "json_attributes_topic": ATTR_TOPIC,
                    "availability_topic": AVAIL_TOPIC, "source_type": "gps", "device": DEVICE}
         client.publish(tracker_topic, json.dumps(tracker), retain=True)
     else:
-        # Location opt-out: remove the tracker entity and clear any GPS previously retained on the
-        # broker so an earlier fix doesn't linger after the user turns location off.
-        client.publish(tracker_topic, "", retain=True)
+        # Location opt-out: remove the tracker entity (the same RFC 0009/C2 minimal-config
+        # sequence as every other retirement, so a tracker HA never discovered this run --
+        # because it was offline when the user opted out -- still gets removed on its next
+        # birth) and clear any GPS previously retained on the broker so an earlier fix doesn't
+        # linger after the user turns location off.
+        _tombstone(client, tracker_topic, loc_id, "json_attributes_topic", ATTR_TOPIC)
         client.publish(ATTR_TOPIC, "", retain=True)
     client.publish(TRACKER_STATE_TOPIC, "", retain=True)
     buttons = []

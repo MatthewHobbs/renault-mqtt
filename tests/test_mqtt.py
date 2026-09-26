@@ -167,6 +167,17 @@ def test_location_tracker_published_and_cleared(monkeypatch):
     assert c.pub["test_node/location/state"] == ""
 
 
+def test_location_opt_out_gets_a_minimal_disabled_config_before_the_tombstone(monkeypatch):
+    """The tracker is a retirement too (RFC 0009/C2): opting location out while HA is offline
+    must not leave a permanent orphan any more than a RETIRED_SENSORS id would."""
+    tracker = "homeassistant/device_tracker/test_node/location/config"
+    c = StubClient()
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", False)
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    _assert_minimal_then_tombstone(c.writes(tracker), "tst_car_location",
+                                    "json_attributes_topic", mqtt.ATTR_TOPIC)
+
+
 def test_location_tracker_declares_no_state_topic(monkeypatch):
     """A state-topic payload becomes location_name, which wins over the lat/lon attributes and stops
     the entity ever resolving a zone. Its ABSENCE from the discovery config is the invariant."""
