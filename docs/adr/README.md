@@ -7,3 +7,4 @@ record.
 | # | Title | Status |
 | --- | --- | --- |
 | [0001](0001-pin-entity-ids-with-default-entity-id.md) | Pin entity ids with default_entity_id | Accepted |
+| [0002](0002-remove-entities-whose-tombstone-ha-missed.md) | Remove entities whose tombstone Home Assistant missed | Accepted |
