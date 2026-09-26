@@ -17,7 +17,8 @@ just e2e 2026.8.1 /path/to/core-checkout --catalog /path/to/alpine_a290/app:cata
 
 Arguments: the HA version (a tag of `ghcr.io/home-assistant/home-assistant`), the core checkout to
 import `renault_mqtt` from (defaults to this repo), and, for scenario (f), each real add-on catalog
-as `SYS_PATH_ENTRY:MODULE`. `--scenarios a,b,c,g,d1,d2,e,f` picks a subset. `--e-repeats N` runs
+as `SYS_PATH_ENTRY:MODULE`. `--scenarios a,b,c,g,d1,d2,d3,d4,d5,e,f` picks a subset; d3, d4
+and d5 share one HA restart, so naming any of them runs all three. `--e-repeats N` runs
 the one-pass rename N times on fresh devices: it is a race between a tombstone and a config sent
 microseconds apart, so one passing trial could be luck. The harness refuses
 to run if `renault_mqtt` was imported from anywhere other than the path given.
@@ -28,6 +29,8 @@ Test at both ends of what the add-ons claim: current stable
 
 The stack is `rmqtt-e2e-<http port>-net`, `-mqtt` (Mosquitto on 127.0.0.1:18831) and `-ha`
 (HA on 127.0.0.1:18131), torn down on exit, failure or SIGTERM. Use `--keep` only to debug.
+Starting a run force-removes containers with its names first. The names carry the HTTP port, so
+two concurrent runs need only their own `--http-port` and `--mqtt-port`.
 
 ## What makes the results evidence
 
@@ -43,6 +46,10 @@ The stack is `rmqtt-e2e-<http port>-net`, `-mqtt` (Mosquitto on 127.0.0.1:18831)
   and gain `_2` suffixes that say nothing about naming.
 - **Each negative has a positive control** that the same instrument can see the positive:
   - (d1) is the control for (d2).
+  - (d3) carries a same-moment control, `d3/control`, and records HA's own `Received message on
+    <topic> ... b''` line, so "not removed" cannot mean "never arrived".
+  - (d5) reads the publisher's retain flag through MQTT 5 retain-as-published; a plain subscriber
+    always sees it cleared on live delivery. `d5/probe` shows the watcher reporting both values.
   - `e/control` must produce `X_2`, or the harness could not detect a collision at all.
   - (g) only counts if HA logged `Updating component: <id>` for that entity.
   - (f) removes `default_entity_id` before publishing. Once it is in the payload HA uses it
@@ -58,6 +65,9 @@ The stack is `rmqtt-e2e-<http port>-net`, `-mqtt` (Mosquitto on 127.0.0.1:18831)
 | c | The same, but with `default_entity_id`: is the id exactly `default_entity_id`? Needs a core that emits it. |
 | d1 | HA online: does an empty retained payload remove the entry, for each of sensor, binary_sensor, button and number? |
 | d2 | HA offline when the tombstone is published: is the entry removed after restart? |
+| d3 | HA offline for the tombstone, then the same discovery pass re-sent once HA's birth message (`homeassistant/status` = `online`) arrives: is the orphan removed? `d3/control` tombstones a sibling HA *did* discover in this run in the same replay; `d3/manual-entity` then deletes one orphan as the entity dialog's Delete does, and `d3/manual-device` the device as the device page's Delete does. |
+| d4 | As (d3), but the re-send first re-publishes the old config so HA discovers it in this run, then the tombstone pass: `immediate` (back to back), `waited` (until HA logs `Found new component`), `minimal` (resurrect with only `unique_id`, `device` and the required topic), `unretained` (minimal, unretained, back to back). Records the delays and what the broker retains afterwards. |
+| d5 | What HA publishes on `homeassistant/status` at first setup, at a clean stop and on restart, when relative to retained discovery being processed, and whether it is retained. |
 | e | Rename with an unchanged friendly name. Tombstone the old `unique_id` and publish a new one with `default_entity_id` = the old id X: does it get X or `X_2`? Runs as one pass, as two passes (tombstone, wait for removal, publish), and as a no-tombstone control. |
 | g | An entity already registered under a `garage_…` id is re-discovered with `default_entity_id`: renamed or left? Rechecked after the (d2) restart. |
 | f | Plain install (no area) of each real catalog: the full HA-derived id list, and any mismatch with the core's `default_entity_id`. |

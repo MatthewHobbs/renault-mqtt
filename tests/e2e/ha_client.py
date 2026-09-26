@@ -261,6 +261,14 @@ class HA:
                 return d
         return None
 
+    def states(self):
+        return {s["entity_id"]: s for s in self.ws_call({"type": "get_states"})}
+
+    def remove_device_from_entry(self, device_id, config_entry_id):
+        """What the device page's Delete does for an MQTT device."""
+        return self.ws_call({"type": "config/device_registry/remove_config_entry",
+                             "device_id": device_id, "config_entry_id": config_entry_id})
+
     def ensure_area(self, name):
         for a in self.ws_call({"type": "config/area_registry/list"}):
             if a["name"] == name:

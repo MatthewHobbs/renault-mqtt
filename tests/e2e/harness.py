@@ -8,10 +8,12 @@ README.md. Run it through `just e2e`; it is deliberately not part of `just ci`.
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import time
 import traceback
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,6 +27,15 @@ SETTLE = 60
 # (d2): how long, AFTER a discovery control has proved HA is processing retained configs again,
 # we keep watching for the tombstoned entries to disappear.
 D2_WATCH = 180
+# (d3): how long an online re-sent tombstone is given to remove an orphan, once the same-moment
+# sibling control has shown that an online tombstone is being acted on.
+D3_WATCH = 90
+# (d3), (d4): the device name suffix for each variant of the offline-tombstone restart.
+OFFLINE = {"d3": "E2E D3 Car", "d4i": "E2E D4I Car", "d4w": "E2E D4W Car", "d4m": "E2E D4M Car",
+           "d4u": "E2E D4U Car"}
+# The one key each domain cannot be configured without; (d4m) resurrects with only these.
+REQUIRED_TOPIC = {"sensor": "state_topic", "binary_sensor": "state_topic", "button": "command_topic",
+                  "number": "command_topic"}
 
 # One old/new entity per class for the rename scenarios, with identical friendly names.
 E_OLD = {"sensor": ("SENSORS", "e2e_old_battery"), "binary_sensor": ("BINARY_SENSORS", "e2e_old_plug"),
@@ -89,16 +100,39 @@ class Run:
         a = self.args
         log(f"stack up: HA {a.ha_version}, http 127.0.0.1:{a.http_port}, mqtt 127.0.0.1:{a.mqtt_port}")
         stack.up(a.ha_version, a.http_port, a.mqtt_port)
+        if "d5" in a.scenarios:
+            for attempt in range(20):      # Mosquitto may not be listening the instant it starts
+                try:
+                    self.watch_status()
+                    break
+                except OSError:
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.5)
         self.ha.wait_http()
         self.ha.onboard()
         flow = self.ha.add_mqtt(stack.BROKER)
         self.notes.append(f"MQTT flow: {flow['trail']}")
+        self.t_mqtt_added = time.monotonic()
         self.ha.wait_mqtt_loaded()
+        self.t_mqtt_loaded_first = time.monotonic()
+        if getattr(self, "watcher", None) is not None:
+            # HA holds the birth until discovery has been quiet for 5 s (client.py
+            # _discovery_cooldown), so publishing scenarios straight away would defer it past
+            # the restart and (d5) would report no first birth when there was simply no pause.
+            self.first_birth = self.watcher.wait_for("homeassistant/status", "online", self.t_setup, 60)
         cfg = self.ha.get_config()
         self.ha_version = cfg["version"]
         log(f"HA get_config version: {self.ha_version}; websocket ha_version: {self.ha.ha_version}")
         self.area_id = self.ha.ensure_area(AREA)
         self.broker = cr.Broker(a.mqtt_port)
+
+    def watch_status(self):
+        """(d5) Subscribe to HA's birth topic before HA's MQTT client exists, so the first birth is
+        seen too. Runs before up() adds the MQTT integration."""
+        self.watcher = cr.Watcher(self.args.mqtt_port, ["homeassistant/status"])
+        self.watch_probe = self.watcher.probe()
+        self.t_setup = time.monotonic()
 
     # ------------------------------------------------------------------ (a)
     def scenario_a(self):
@@ -251,6 +285,10 @@ class Run:
                 supported = supported - {cat.SOC_ENDPOINT}
                 source[c] = "core: SOC endpoint unsupported"
             else:
+                # Drop it from the pass too. Left in, the core re-sends its CONFIG ahead of this
+                # tombstone, which is a resurrect-then-tombstone and not a tombstone at all: that
+                # made (d3)'s binary_sensor look removed by the tombstone alone.
+                getattr(v2, table).pop(obj)
                 topic = cr.topic_of(v1_recs, self.u(obj, sfx))
                 harness.append({"topic": topic, "payload": "", "retain": True, "qos": 0,
                                 "edited": "HARNESS tombstone: core has no retirement for this class"})
@@ -321,6 +359,265 @@ class Run:
                      f"published in the same offline window {'appeared' if ok_ctl else 'DID NOT appear'} "
                      f"{t_ctl:.0f}s after start, then watched {D2_WATCH}s more; (3) broker retained on "
                      f"the control topic: {'yes' if late_topic in retained else 'NO'}")
+
+    # ------------------------------------------------------------------ (d3), (d4), (d5)
+    # The question: if HA missed a tombstone while it was down, does re-sending discovery when HA
+    # announces itself (the birth message, HA's documented trigger) remove the orphan? HA's
+    # discovery only acts on an empty payload for a discovery hash it has discovered IN THIS RUN,
+    # and after the restart nothing is retained for the orphan's topic, so the doubt is that a
+    # re-sent tombstone alone is a no-op. (d4) tests the sequence that would satisfy that rule.
+    def offline_prepare(self):
+        """Register one device per variant, in the area; tombstone and restart come at the end."""
+        log("(d3/d4) registering entities for the offline-tombstone + birth re-publish run")
+        self.off = {}
+        for sfx, name in OFFLINE.items():
+            cat = cr.synth_catalog(name)
+            uids = {c: self.u(BASE_UID[c], sfx) for c in cr.CLASSES}
+            v1, before = self.register(cat, sfx, [*uids.values(), self.u("e2e_range", sfx)])
+            dev = self.to_area(sfx)
+            self.off[sfx] = types.SimpleNamespace(cat=cat, uids=uids, v1=v1, before=before, device_id=dev["id"],
+                                                  topics={c: cr.topic_of(v1, uids[c]) for c in cr.CLASSES})
+
+    @staticmethod
+    def _received_empty(logs, topic):
+        """Count HA's own debug lines for a zero-length message on `topic`: proof it arrived."""
+        pat = re.compile(r"message on " + re.escape(topic) + r" \(qos=\d\).*: b''")
+        return sum(1 for ln in logs.splitlines() if pat.search(ln))
+
+    @staticmethod
+    def _found_line(topic):
+        domain, node, obj = cr.config_topic_parts(topic)
+        return f"Found new component: {domain} {node} {obj}"
+
+    def _ids(self, o, uid, snap, states=None):
+        b = o.before[uid]
+        ids = {"entity_id": b["entity_id"], "registry_id": b["id"], "device_id": b["device_id"],
+               "area_of_device": AREA, "still_registered": (snap.get(uid) or {}).get("entity_id")}
+        if states is not None:
+            st = states.get(b["entity_id"])
+            ids["state_after_restart"] = None if st is None else {
+                "state": st["state"], "restored": st["attributes"].get("restored", False)}
+        return ids
+
+    def _resurrect_then_tombstone(self, sfx, tombstone_pass, minimal, wait, retain=True):
+        """(d4) Re-publish the old config so HA discovers it in this run, then the tombstone pass.
+        retain=False sends the resurrect unretained, so a crash between the two publishes cannot
+        leave the old config retained for the next subscriber."""
+        o = self.off[sfx]
+        confs = cr.configs(o.v1)
+        resurrect = []
+        for c in cr.CLASSES:
+            domain, rec, conf = confs[o.uids[c]]
+            if minimal:
+                conf = {"unique_id": conf["unique_id"], "device": conf["device"],
+                        REQUIRED_TOPIC[domain]: conf[REQUIRED_TOPIC[domain]]}
+                rec = dict(rec, payload=json.dumps(conf),
+                           edited="HARNESS minimal resurrect config: unique_id, device, required topic")
+            if not retain:
+                rec = dict(rec, retain=False, edited=f"{rec.get('edited', 'HARNESS resurrect')}; UNRETAINED")
+            resurrect.append(rec)
+        since = time.time() - 1
+        t0 = time.monotonic()
+        timing = {}
+        if wait:
+            self.broker.replay(resurrect)
+            want = [self._found_line(r["topic"]) for r in resurrect]
+            deadline = time.monotonic() + SETTLE
+            while True:
+                logs = stack.ha_logs(since)
+                found = all(line in logs for line in want)
+                if found or time.monotonic() > deadline:
+                    break
+                time.sleep(0.5)
+            timing["resurrect_to_all_found_s"] = round(time.monotonic() - t0, 1) if found else None
+            mid = self.ha.entities_by_uid()
+            timing["entity_id_after_resurrect"] = {c: (mid.get(o.uids[c]) or {}).get("entity_id") for c in cr.CLASSES}
+            t1 = time.monotonic()
+            self.broker.replay(tombstone_pass)
+        else:
+            t1 = t0
+            self.broker.replay(resurrect + tombstone_pass)
+        ok, snap = self.ha.wait_registry(absent=list(o.uids.values()), timeout=SETTLE)
+        timing["tombstone_to_removed_s"] = round(time.monotonic() - t1, 1) if ok else None
+        logs = stack.ha_logs(since)
+        order = cr.describe(resurrect) + ([f"--- waited for 'Found new component' x{len(resurrect)}"] if wait else []) \
+            + cr.describe(tombstone_pass)
+        return snap, logs, timing, order
+
+    def scenario_offline(self):
+        log("(d3/d4/d5) tombstone published while HA is down; re-publish after HA's birth message")
+        if getattr(self, "watcher", None) is None:
+            self.watcher = cr.Watcher(self.args.mqtt_port, ["homeassistant/status"])
+            self.watch_probe = self.watcher.probe()
+        w = self.watcher
+        passes, sources = {}, {}
+        for sfx, o in self.off.items():
+            passes[sfx], sources[sfx] = self.tombstone_records(o.cat, sfx, cr.CLASSES, o.v1)
+        d3 = self.off["d3"]
+        # Positive control that HA processes retained discovery after the restart, as in (d2).
+        late_cat = cr.synth_catalog(OFFLINE["d3"], sensors={**d3.cat.SENSORS, "e2e_late": ("Late", None, None, None)})
+        late = [r for r in cr.isolate(cr.record(self.core, late_cat), "d3") if "/e2e_late/" in r["topic"]]
+        late_uid, late_topic = self.u("e2e_late", "d3"), late[0]["topic"]
+        pre = self.ha.entities_by_uid()
+        assert all(u in pre for o in self.off.values() for u in o.uids.values())
+
+        t_stop = time.monotonic()
+        stack.stop_ha()
+        self.ha.ws_close()
+        self.broker.replay([r for sfx in self.off for r in passes[sfx]] + late)
+        retained = self.broker.retained("homeassistant/#")
+        since = time.time() - 1
+        t0 = time.monotonic()
+        stack.start_ha()
+        self.ha.wait_api()
+        t_api = time.monotonic()
+        self.ha.wait_mqtt_loaded()
+        t_mqtt = time.monotonic()
+        ok_ctl, snap = self.ha.wait_registry(present=[late_uid], timeout=120)
+        t_ctl = time.monotonic()
+        birth = w.wait_for("homeassistant/status", "online", after=t0, timeout=180)
+        t_birth = birth["t"] if birth else None
+        # Read now: (d3/manual) deletes the d3 device, which clears the control's retained config.
+        status_retained = self.broker.retained("homeassistant/status")
+        ctl_retained = self.broker.retained(late_topic)
+        states = self.ha.states()
+        snap = self.ha.entities_by_uid()
+        self.offline_restart = {"t0": t0, "t_stop": t_stop, "t_api": t_api, "t_mqtt": t_mqtt, "t_ctl": t_ctl,
+                                "ok_ctl": ok_ctl, "birth": birth, "since": since, "late_topic": late_topic,
+                                "status_retained": status_retained, "ctl_retained": ctl_retained}
+        rel = lambda t: None if t is None else round(t - t0, 1)  # noqa: E731
+        restart_ctl = (f"control: new entity {late_uid}, published in the same offline window, "
+                       f"{'registered' if ok_ctl else 'DID NOT register'} {rel(t_ctl)}s after start; "
+                       f"birth 'online' seen {rel(t_birth)}s after start")
+        not_retained = {sfx: {c: retained.get(o.topics[c], "<nothing retained>")[:30] for c in cr.CLASSES}
+                        for sfx, o in self.off.items()}
+
+        # ---- (d3): the birth-triggered re-publish, i.e. the core's same pass again, HA online.
+        # Same-moment control: a sibling HA DID discover in this run (its config stayed retained)
+        # is tombstoned in the same replay. It must go, or this run could not see a removal at all.
+        ctl_uid = self.u("e2e_range", "d3")
+        ctl_topic = cr.topic_of(d3.v1, ctl_uid)
+        resend = passes["d3"] + [{"topic": ctl_topic, "payload": "", "retain": True, "qos": 0,
+                                  "edited": "HARNESS control tombstone: sibling discovered in this run"}]
+        self.d3_order = cr.describe(resend)
+        s3 = time.time() - 1
+        t3 = time.monotonic()
+        self.broker.replay(resend)
+        ok_c, snap = self.ha.wait_registry(absent=[ctl_uid], timeout=SETTLE)
+        t_c = round(time.monotonic() - t3, 1)
+        ok3, snap = self.ha.wait_registry(absent=list(d3.uids.values()), timeout=D3_WATCH)
+        logs3 = stack.ha_logs(s3)
+        self.row("d3/control", "sensor", "REMOVED" if ctl_uid not in snap else "NOT-REMOVED",
+                 {"entity_id": d3.before[ctl_uid]["entity_id"], "registry_id": d3.before[ctl_uid]["id"],
+                  "removed_after_s": t_c if ok_c else None,
+                  "ha_logged_removal": f"Removing component: {d3.before[ctl_uid]['entity_id']}" in logs3,
+                  "ha_received_empty": self._received_empty(logs3, ctl_topic)},
+                 "NOT-REMOVED", "this IS the positive control: discovered in this run, tombstoned online")
+        for c in cr.CLASSES:
+            uid = d3.uids[c]
+            self.row("d3", c, "REMOVED" if uid not in snap else "NOT-REMOVED",
+                     {**self._ids(d3, uid, snap, states), "tombstone_source": sources["d3"][c],
+                      "broker_retained_after_offline_tombstone": not_retained["d3"][c],
+                      "ha_received_empty_online": self._received_empty(logs3, d3.topics[c]),
+                      "ha_logged_removal": f"Removing component: {d3.before[uid]['entity_id']}" in logs3},
+                     "REMOVED, as the same-moment sibling control was",
+                     f"{restart_ctl}; sibling control {'removed' if ok_c else 'NOT removed'} {t_c}s after the "
+                     f"re-send; orphans then watched {D3_WATCH}s; d1 is the cross-run control")
+
+        # ---- (d4): resurrect the old config first, then the tombstone pass.
+        for sfx, minimal, wait, retain, label in (
+                ("d4i", False, False, True, "d4/immediate"), ("d4w", False, True, True, "d4/waited"),
+                ("d4m", True, True, True, "d4/minimal"), ("d4u", True, False, False, "d4/unretained")):
+            o = self.off[sfx]
+            snap4, logs4, timing, order = self._resurrect_then_tombstone(sfx, passes[sfx], minimal, wait, retain)
+            timing["broker_retained_after"] = {c: self.broker.retained(o.topics[c], wait=1.0).get(o.topics[c],
+                                                                                             "<nothing retained>")[:30]
+                                               for c in cr.CLASSES}
+            setattr(self, f"{sfx}_order", order)
+            for c in cr.CLASSES:
+                uid = o.uids[c]
+                self.row(label, c, "REMOVED" if uid not in snap4 else "NOT-REMOVED",
+                         {**self._ids(o, uid, snap4, states), "tombstone_source": sources[sfx][c],
+                          "broker_retained_after_offline_tombstone": not_retained[sfx][c],
+                          "ha_found_in_this_run": self._found_line(o.topics[c]) in logs4,
+                          "ha_logged_removal": f"Removing component: {o.before[uid]['entity_id']}" in logs4,
+                          **timing},
+                         "NOT-REMOVED, as (d3) shows for a tombstone alone",
+                         f"{restart_ctl}; (d3) is the same pass without the resurrect")
+
+        # ---- (d3/manual): what 'status quo + document a manual delete' asks of the user: the
+        # device page's Delete. Run only on the d3 device, and only after (d3) has been read.
+        leftover = [u for u in d3.uids.values() if u in self.ha.entities_by_uid()]
+        if leftover:
+            # First the gentler instruction: delete one orphan entity from its settings dialog.
+            one = leftover.pop(0)
+            eid = d3.before[one]["entity_id"]
+            self.ha.ws_call({"type": "config/entity_registry/remove", "entity_id": eid})
+            ok_e, snap_e = self.ha.wait_registry(absent=[one], timeout=SETTLE)
+            self.row("d3/manual-entity", "all", "REMOVED" if ok_e else "NOT-REMOVED",
+                     {"entity_id": eid, "registry_id": d3.before[one]["id"],
+                      "siblings_untouched": all(u in snap_e for u in leftover)},
+                     "orphan still registered", "config/entity_registry/remove, the entity dialog's Delete")
+        if leftover:
+            entry_id = d3.before[d3.uids["sensor"]]["config_entry_id"]
+            self.ha.remove_device_from_entry(d3.device_id, entry_id)
+            ok_m, snap_m = self.ha.wait_registry(absent=leftover, timeout=SETTLE)
+            dev_after = self.ha.device_by_identifier(f"{cr.SYNTH_NODE}_d3")
+            self.row("d3/manual-device", "all", "REMOVED" if ok_m else "NOT-REMOVED",
+                     {"device_id": d3.device_id, "orphans": {u: d3.before[u]["entity_id"] for u in leftover},
+                      "device_still_registered": dev_after is not None},
+                     "orphans still registered",
+                     "config/device_registry/remove_config_entry, the call behind the device page's Delete")
+        else:
+            self.row("d3/manual", "all", "N/A", {}, "", "no orphan left by (d3) to delete by hand")
+
+        self.report_d5()
+        if self.args.out:
+            # The raw HA log from the restart on: what every 'ha_*' field above was read from.
+            with open(self.args.out + ".ha.log", "w") as fh:
+                fh.write(stack.ha_logs(since))
+
+    def report_d5(self):
+        """(d5) What HA publishes on homeassistant/status, when, and whether retained."""
+        w, r = self.watcher, self.offline_restart
+        t0 = r["t0"]
+        self.row("d5/probe", "instrument", "OK" if self.watch_probe.get("probe-retained") is True
+                 and self.watch_probe.get("probe-plain") is False else "BROKEN",
+                 {"seen": self.watch_probe}, "both flags reading the same value",
+                 "the watcher reports the publisher's retain flag (MQTT 5 retain-as-published), and "
+                 "reports True and False for a retained and a plain publish")
+        status = w.on("homeassistant/status")
+        first = [m for m in status if m["t"] < r["t_stop"]]
+        base = getattr(self, "t_mqtt_added", None)
+        self.row("d5/first-setup", "status", "SEEN" if first else "NONE",
+                 {"messages": [{"payload": m["payload"], "retain": m["retain"],
+                                "s_after_mqtt_flow_created": None if base is None else round(m["t"] - base, 1)}
+                               for m in first]},
+                 "no message", "watcher subscribed before the MQTT integration was added"
+                 if hasattr(self, "t_setup") else "watcher started late: first setup not observed")
+        stop = [m for m in status if r["t_stop"] <= m["t"] < t0]
+        self.row("d5/stop", "status", "SEEN" if stop else "NONE",
+                 {"messages": [{"payload": m["payload"], "retain": m["retain"],
+                                "s_after_stop_requested": round(m["t"] - r["t_stop"], 1)} for m in stop]},
+                 "no message", "docker stop -t 60 (clean shutdown)")
+        after = [m for m in status if m["t"] >= t0]
+        logs = stack.ha_logs(r["since"])
+        self.row("d5/restart", "status", "SEEN" if after else "NONE",
+                 {"messages": [{"payload": m["payload"], "retain": m["retain"],
+                                "s_after_start": round(m["t"] - t0, 1),
+                                "s_after_api_up": round(m["t"] - r["t_api"], 1),
+                                "s_after_mqtt_loaded": round(m["t"] - r["t_mqtt"], 1),
+                                "s_after_retained_control_registered": round(m["t"] - r["t_ctl"], 1)}
+                               for m in after],
+                  "ha_logged_birth_sent": "MQTT client initialized, birth message sent" in logs},
+                 "no birth, or a birth before retained discovery was processed",
+                 "negative s_after_retained_control_registered would mean the birth came first")
+        snap, ctl = r["status_retained"], r["ctl_retained"]
+        self.row("d5/retained", "status", "RETAINED" if "homeassistant/status" in snap else "NOT-RETAINED",
+                 {"fresh_subscriber_got": snap},
+                 "RETAINED",
+                 f"control: the same fresh-subscriber read of a retained config topic "
+                 f"{'returned it' if r['late_topic'] in ctl else 'RETURNED NOTHING'}")
 
     # ------------------------------------------------------------------ (e)
     def scenario_e(self, variant, sfx):
@@ -439,15 +736,18 @@ class Run:
         self.up()
         steps = [("a", self.scenario_a), ("b", self.scenario_b), ("c", self.scenario_c),
                  ("g", self.scenario_g), ("d1", self.scenario_d1), ("d2", self.d2_prepare),
+                 ("offline", self.offline_prepare),
                  ("e", lambda: self.scenario_e("control", "e0")),
                  # The one-pass variant is a race between a tombstone and a config microseconds
                  # apart, so a single trial could pass by luck; --e-repeats runs it on fresh devices.
                  *[("e", lambda n=n: self.scenario_e("one-pass", "e1" if n == 0 else f"e1r{n}"))
                    for n in range(self.args.e_repeats)],
                  ("e", lambda: self.scenario_e("two-pass", "e2")),
-                 ("f", self.scenario_f), ("d2", self.scenario_d2)]
+                 ("f", self.scenario_f), ("d2", self.scenario_d2), ("offline", self.scenario_offline)]
+        # d3, d4 and d5 share one HA restart, so selecting any of them runs all three.
+        offline = bool(wanted & {"d3", "d4", "d5"})
         for name, fn in steps:
-            if name not in wanted:
+            if name not in wanted and not (name == "offline" and offline):
                 continue
             try:
                 fn()
@@ -483,7 +783,7 @@ def main():
     p.add_argument("--core", required=True, help="path to a renault-mqtt checkout to import the core from")
     p.add_argument("--catalog", action="append", default=[],
                    help="real catalog for (f) as SYS_PATH_ENTRY:MODULE; repeatable")
-    p.add_argument("--scenarios", default="a,b,c,g,d1,d2,e,f")
+    p.add_argument("--scenarios", default="a,b,c,g,d1,d2,d3,d4,d5,e,f")
     p.add_argument("--e-repeats", type=int, default=1, help="trials of the (e) one-pass variant")
     p.add_argument("--http-port", type=int, default=18131)
     p.add_argument("--mqtt-port", type=int, default=18831)
@@ -501,6 +801,8 @@ def main():
     finally:
         if run.broker:
             run.broker.close()
+        if getattr(run, "watcher", None):
+            run.watcher.close()
         run.ha.ws_close()
         if not args.keep:
             stack.teardown()
@@ -508,7 +810,8 @@ def main():
     result = {"ha_version_requested": args.ha_version, "ha_version_running": getattr(run, "ha_version", None),
               "image": stack.image_digest(args.ha_version), "core": core.path, "core_version": core.version,
               "capabilities": run.caps, "notes": run.notes, "rows": run.rows,
-              "order": {k: getattr(run, k) for k in ("d1_order", "e_order_control", "e_order_one-pass",
+              "order": {k: getattr(run, k) for k in ("d1_order", "d3_order", "d4i_order", "d4w_order", "d4m_order",
+                                                     "e_order_control", "e_order_one-pass",
                                                      "e_order_two-pass") if hasattr(run, k)}}
     if args.out:
         with open(args.out, "w") as fh:

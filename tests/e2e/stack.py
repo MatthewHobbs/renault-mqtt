@@ -21,6 +21,7 @@ def name_stack(http_port):
     base = f"{PREFIX}-{http_port}"
     NETWORK, BROKER, HA = f"{base}-net", f"{base}-mqtt", f"{base}-ha"
 
+
 MOSQUITTO_CONF = "listener 1883 0.0.0.0\nallow_anonymous true\npersistence false\n"
 
 # mqtt debug is what the harness greps for "Updating component" / "Removing component": the only

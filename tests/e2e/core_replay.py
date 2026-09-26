@@ -235,11 +235,12 @@ class Broker:
 
     def replay(self, records):
         """Publish in recorded order. retain is the core's own flag (always True for these), qos
-        the core's own (the default 0), so the wire sequence is what production would send."""
+        the core's own (the default 0), so the wire sequence is what production would send. Only
+        a record the harness built and labelled (`edited`) may be unretained."""
         for r in records:
-            if not r["retain"]:
+            if not r["retain"] and not r.get("edited"):
                 raise AssertionError(f"core published {r['topic']} unretained; replay would diverge")
-            info = self.client.publish(r["topic"], r["payload"], qos=r["qos"], retain=True)
+            info = self.client.publish(r["topic"], r["payload"], qos=r["qos"], retain=r["retain"])
             info.wait_for_publish(timeout=10)
 
     def retained(self, pattern, wait=3.0):
@@ -261,6 +262,68 @@ class Broker:
         c.loop_stop()
         c.disconnect()
         return got
+
+    def close(self):
+        self.client.loop_stop()
+        self.client.disconnect()
+
+
+class Watcher:
+    """Records every message on `topics`, with the PUBLISHER's retain flag.
+
+    A plain subscriber cannot answer "was it published retained?": the broker clears the flag on
+    live delivery, so every reading would be False. MQTT 5 retain-as-published keeps it, and
+    probe() shows the instrument reporting both values before any reading counts."""
+
+    PROBE = "rmqtt-e2e/probe"
+
+    def __init__(self, port, topics):
+        self.msgs = []
+        self._lock = threading.Lock()
+        self._subscribed = threading.Event()
+        opts = paho_mqtt.SubscribeOptions(qos=0, retainAsPublished=True)
+        self._topics = [(t, opts) for t in [*topics, self.PROBE]]
+        self.client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION2,
+                                       client_id=f"rmqtt-e2e-watch-{time.time_ns()}",
+                                       protocol=paho_mqtt.MQTTv5)
+        self.client.on_connect = lambda c, *_: c.subscribe(self._topics)
+        self.client.on_subscribe = lambda *_: self._subscribed.set()
+        self.client.on_message = self._on_message
+        self.client.connect("127.0.0.1", port)
+        self.client.loop_start()
+        if not self._subscribed.wait(10):
+            raise RuntimeError("watcher never subscribed")
+
+    def _on_message(self, _c, _u, msg):
+        with self._lock:
+            self.msgs.append({"t": time.monotonic(), "wall": time.time(), "topic": msg.topic,
+                              "payload": msg.payload.decode(errors="replace"), "retain": bool(msg.retain)})
+
+    def probe(self):
+        """Publish one retained and one unretained message; return the flags the watcher saw."""
+        for payload, retain in (("probe-retained", True), ("probe-plain", False)):
+            self.client.publish(self.PROBE, payload, retain=retain).wait_for_publish(timeout=10)
+        self.client.publish(self.PROBE, "", retain=True).wait_for_publish(timeout=10)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            seen = {m["payload"]: m["retain"] for m in self.on(self.PROBE)}
+            if "probe-retained" in seen and "probe-plain" in seen:
+                return seen
+            time.sleep(0.1)
+        return {m["payload"]: m["retain"] for m in self.on(self.PROBE)}
+
+    def on(self, topic, after=None):
+        with self._lock:
+            return [dict(m) for m in self.msgs if m["topic"] == topic and (after is None or m["t"] >= after)]
+
+    def wait_for(self, topic, payload, after, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for m in self.on(topic, after):
+                if m["payload"] == payload:
+                    return m
+            time.sleep(0.2)
+        return None
 
     def close(self):
         self.client.loop_stop()
