@@ -247,7 +247,10 @@ def publish_discovery(client, supported_eps, dist_unit):
         for obj in retired:
             seg = _topic_segment(domain, obj, prefix)
             topic = f"{DISCOVERY_PREFIX}/{domain}/{NODE}/{seg}/config"
-            if domain == "button":
+            if domain in ("button", "number"):
+                # Both require command_topic (HA's mqtt.number schema makes it mandatory,
+                # unlike state_topic) -- a minimal config missing it fails validation, so HA
+                # never discovers the id and the empty payload that follows tombstones nothing.
                 _tombstone(client, topic, obj, "command_topic", f"{CMD_PREFIX}{seg}")
             else:
                 _tombstone(client, topic, obj, "state_topic", STATE_TOPIC)
@@ -385,7 +388,7 @@ def publish_discovery(client, supported_eps, dist_unit):
             client.publish(topic, json.dumps(conf), retain=True)
             numbers.append(short)
         else:
-            _tombstone(client, topic, obj, "state_topic", STATE_TOPIC)
+            _tombstone(client, topic, obj, "command_topic", f"{CMD_PREFIX}{short}")
     LOG.info("Published discovery: %d sensors (%d unsupported cleared), %d binary_sensors, "
              "location=%s, refresh_location=%s, buttons=%s, numbers=%s",
              published, len(skip), len(cat.BINARY_SENSORS),

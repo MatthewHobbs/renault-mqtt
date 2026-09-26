@@ -704,7 +704,11 @@ def test_retired_id_gets_a_minimal_disabled_config_before_the_tombstone(domain, 
     mqtt.configure(_retire(table, attr, obj))
     c = StubClient()
     mqtt.publish_discovery(c, _ALL_EPS, "km")
-    key, value = (("command_topic", f"test_node/cmd/{obj.removeprefix('tst_')}") if domain == "button"
+    # command_topic, not state_topic, for button and number: HA's mqtt.number schema requires
+    # command_topic, so a minimal config carrying only state_topic fails validation and is never
+    # discovered -- an e2e gap that unit tests with a StubClient cannot see (real-HA finding,
+    # RFC 0009 gate, 2026-09-26).
+    key, value = (("command_topic", f"test_node/cmd/{obj.removeprefix('tst_')}") if domain in ("button", "number")
                   else ("state_topic", mqtt.STATE_TOPIC))
     _assert_minimal_then_tombstone(c.writes(live), obj, key, value)
 
