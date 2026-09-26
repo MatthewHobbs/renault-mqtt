@@ -461,6 +461,22 @@ class Run:
                 self.row("after-restart", "all", "ERROR", {}, "", f"{type(err).__name__}: {err}")
 
 
+# What a sound run of the current core gives. Anything else fails the run: a result string is only
+# evidence if something reads it. d2 pins the known offline-tombstone gap; flip it with the fix.
+EXPECTED = {"a": {"KEPT"}, "b": {"AREA-PREFIXED"}, "c": {"EXACT"}, "d1": {"REMOVED"},
+            "d2": {"NOT-REMOVED"}, "e/control": {"GOT-X_n"}, "e/one-pass": {"GOT-X"},
+            "e/two-pass": {"GOT-X"}, "f": {"BASELINE", "MATCH"}, "g": {"LEFT"},
+            "g-after-restart": {"LEFT"}}
+
+
+def unexpected(rows):
+    """Rows whose result is neither the expected one nor N/A (a scenario the core cannot express)."""
+    def key(scenario):
+        parts = scenario.split("/")
+        return "/".join(parts[:2]) if parts[0] == "e" else parts[0]
+    return [r for r in rows if r["result"] != "N/A" and r["result"] not in EXPECTED.get(key(r["scenario"]), ())]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ha-version", required=True)
@@ -498,7 +514,11 @@ def main():
         with open(args.out, "w") as fh:
             json.dump(result, fh, indent=2)
         log(f"wrote {args.out}")
-    return 1 if any(r["result"] == "ERROR" for r in run.rows) else 0
+    bad = unexpected(run.rows)
+    for r in bad:
+        log(f"UNEXPECTED {r['scenario']} {r['class']}: {r['result']}")
+    log(f"{len(run.rows) - len(bad)}/{len(run.rows)} rows as expected")
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

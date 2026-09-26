@@ -11,9 +11,15 @@ import tempfile
 import time
 
 PREFIX = "rmqtt-e2e"
-NETWORK = f"{PREFIX}-net"
-BROKER = f"{PREFIX}-mqtt"
-HA = f"{PREFIX}-ha"
+NETWORK = BROKER = HA = None
+
+
+def name_stack(http_port):
+    # Names carry the HA port: up() force-removes its own names first, so a shared name would let
+    # a second run on other ports tear down the first mid-scenario.
+    global NETWORK, BROKER, HA
+    base = f"{PREFIX}-{http_port}"
+    NETWORK, BROKER, HA = f"{base}-net", f"{base}-mqtt", f"{base}-ha"
 
 MOSQUITTO_CONF = "listener 1883 0.0.0.0\nallow_anonymous true\npersistence false\n"
 
@@ -47,11 +53,14 @@ def _copy_in(container, content, dest):
 
 def teardown():
     """Remove our containers and network. Safe to call when none exist."""
+    if HA is None:
+        return
     _docker("rm", "-f", HA, BROKER, check=False)
     _docker("network", "rm", NETWORK, check=False)
 
 
 def up(ha_version, http_port, mqtt_port):
+    name_stack(http_port)
     teardown()
     _docker("network", "create", NETWORK)
     _docker("create", "--name", BROKER, "--network", NETWORK,

@@ -26,7 +26,7 @@ Test at both ends of what the add-ons claim: current stable
 (`https://version.home-assistant.io/stable.json`) and the oldest version they declare
 (`homeassistant:` in each add-on's `config.yaml`).
 
-The stack is `rmqtt-e2e-net`, `rmqtt-e2e-mqtt` (Mosquitto on 127.0.0.1:18831) and `rmqtt-e2e-ha`
+The stack is `rmqtt-e2e-<http port>-net`, `-mqtt` (Mosquitto on 127.0.0.1:18831) and `-ha`
 (HA on 127.0.0.1:18131), torn down on exit, failure or SIGTERM. Use `--keep` only to debug.
 
 ## What makes the results evidence
