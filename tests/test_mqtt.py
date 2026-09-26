@@ -463,6 +463,31 @@ def test_on_message_ignores_non_command_and_unwired(monkeypatch):
     assert calls == []
 
 
+# --------------------------------------------------------------------------- #
+# RFC 0009 / C2: re-publish discovery on HA's birth message, and tombstone
+# retired ids as a minimal disabled config followed by the empty payload.
+# --------------------------------------------------------------------------- #
+def test_on_message_republishes_discovery_on_ha_birth():
+    mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = _ALL_EPS, "km"
+    c = StubClient()
+    mqtt._on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"online"))
+    assert "homeassistant/sensor/test_node/tst_battery/config" in c.pub
+
+
+def test_on_message_ignores_non_online_birth_payload():
+    mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = _ALL_EPS, "km"
+    c = StubClient()
+    mqtt._on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"offline"))
+    assert c.pub == {}
+
+
+def test_on_message_birth_is_a_noop_before_first_discovery():
+    mqtt._MQTT_CTX["supported"] = None
+    c = StubClient()
+    mqtt._on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"online"))
+    assert c.pub == {}
+
+
 def test_on_connect_republishes_discovery_when_ctx_set():
     c = StubClient()
     mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = _ALL_EPS, "km"
@@ -470,6 +495,15 @@ def test_on_connect_republishes_discovery_when_ctx_set():
     assert "test_node/cmd/#" in c.subs
     assert c.pub["test_node/availability"] == "online"
     assert "homeassistant/sensor/test_node/tst_battery/config" in c.pub   # discovery republished
+
+
+def test_on_connect_subscribes_to_ha_birth_topic():
+    """RFC 0009 option C/C2: HA's documented discovery trigger is its birth message on
+    homeassistant/status, not only the add-on's own reconnect."""
+    c = StubClient()
+    mqtt._MQTT_CTX["supported"] = None
+    mqtt._on_connect(c, None, None, 0)
+    assert "homeassistant/status" in c.subs
 
 
 def test_on_connect_skips_discovery_when_ctx_unset():
@@ -634,6 +668,53 @@ def test_retired_ids_are_named_in_the_log(caplog):
     debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
     for domain, _, _, _ in _NEW_RETIRABLE:
         assert any(f"tst_gone_{domain}" in m and f"{domain} " in m for m in debug), domain
+
+
+def _assert_minimal_then_tombstone(writes, obj, required_topic_key, required_topic_value):
+    """C2's shape for a retirement: an unretained minimal config (unique_id + device + the domain's
+    required topic + enabled_by_default: false, so HA never records history/logbook for it and it
+    is removed even when the install has disabled it), then the ordinary empty retained tombstone."""
+    assert len(writes) == 2, writes
+    (minimal_payload, minimal_retain), (tomb_payload, tomb_retain) = writes
+    assert (tomb_payload, tomb_retain) == ("", True)
+    assert minimal_retain is False
+    minimal = json.loads(minimal_payload)
+    assert minimal["unique_id"] == obj
+    assert minimal["device"] == mqtt.DEVICE
+    assert minimal["enabled_by_default"] is False
+    assert minimal[required_topic_key] == required_topic_value
+
+
+@pytest.mark.parametrize("domain,table,attr,obj", _NEW_RETIRABLE)
+def test_retired_id_gets_a_minimal_disabled_config_before_the_tombstone(domain, table, attr, obj):
+    """Gate result (RFC 0009, 2026-09-26): the minimal config alone (without
+    enabled_by_default: false) wrote 2 recorder history rows per id per cycle for an id the
+    install never had, and left a disabled orphan un-removed. Adding enabled_by_default: false
+    (option C2) measured clean on both."""
+    live = _live_topic(obj)
+    mqtt.configure(_retire(table, attr, obj))
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    key, value = (("command_topic", f"test_node/cmd/{obj.removeprefix('tst_')}") if domain == "button"
+                  else ("state_topic", mqtt.STATE_TOPIC))
+    _assert_minimal_then_tombstone(c.writes(live), obj, key, value)
+
+
+def test_retired_sensor_gets_a_minimal_disabled_config_before_the_tombstone():
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    _assert_minimal_then_tombstone(c.writes("homeassistant/sensor/test_node/tst_old/config"),
+                                    "tst_old", "state_topic", mqtt.STATE_TOPIC)
+
+
+def test_unsupported_endpoint_sensor_gets_a_minimal_disabled_config_before_the_tombstone():
+    """The proposal covers every retirement, not only RETIRED_SENSORS: an endpoint the car does
+    not support is tombstoned the same way, so an orphan from a lost endpoint doesn't linger
+    either (option D would skip this and leave that gap, per the RFC's cost/risk table)."""
+    c = StubClient()
+    mqtt.publish_discovery(c, set(), "km")           # nothing supported -> pressure cleared
+    _assert_minimal_then_tombstone(c.writes("homeassistant/sensor/test_node/tst_pressure/config"),
+                                    "tst_pressure", "state_topic", mqtt.STATE_TOPIC)
 
 
 def test_new_retired_lists_are_optional():
