@@ -1,7 +1,6 @@
 # ADR 0001 — Pin entity ids with default_entity_id
 
-- **Status:** Proposed. The owner confirmed the four decisions below on 2026-09-26; this record
-  awaits his acceptance, which is what authorises the Open rows.
+- **Status:** Accepted 2026-09-26 by the owner, after row 2's end-to-end results were recorded.
 - **Context:** r5-ha-addon issue #83: `number.auto_r5_soc_max_target` instead of
   `number.r5_soc_max_target`, because Home Assistant put the device's area into a new entity's
   id. Proposed as [RFC 0005: pin MQTT entity ids with default_entity_id](https://claude.ai/code/artifact/e4bf159f-2c74-4efd-a64c-aa29e68c914f).
@@ -29,7 +28,7 @@ Decisions the owner confirmed on 2026-09-26:
 
 | # | Step | Owner | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 1 | `publish_discovery` sends `default_entity_id` = name-derived id on all five domains; keeps `object_id`; `configure()` rejects a name whose id the core cannot derive; tests pin the slug rule | renault-mqtt | Open | Branch `feat-default-entity-id`; PR not yet opened |
+| 1 | `publish_discovery` sends `default_entity_id` = name-derived id on all five domains; keeps `object_id`; `configure()` rejects a name whose id the core cannot derive; tests pin the slug rule | renault-mqtt | Open | [PR #28](https://github.com/MatthewHobbs/renault-mqtt/pull/28) |
 | 2 | **End-to-end experiment at HA 2026.8.1 and at current stable.** Scenarios: (a) the pin works with the device in an area; (b) a plain install is unchanged, for the real a290 and r5 catalogs. Gates the merge of row 1. | renault-mqtt (e2e harness) | Done | 2026-09-26, HA 2026.8.1 and 2026.9.3 (stable per stable.json), core `fb85a83`: see "End-to-end results" below |
 | 3 | Core release: `__version__` bump in its own PR; the release workflow tags it | renault-mqtt | Open | |
 | 4 | a290-ha-addon: `CORE_REF` bump, conformance test reads `default_entity_id`, patch release, container boot | a290-ha-addon | Open | |
