@@ -269,6 +269,20 @@ class HA:
         return self.ws_call({"type": "config/device_registry/remove_config_entry",
                              "device_id": device_id, "config_entry_id": config_entry_id})
 
+    def history(self, start_iso, entity_ids, end_iso):
+        """Recorded states, flattened, for `entity_ids` (live or since removed)."""
+        q = urllib.parse.urlencode({"filter_entity_id": ",".join(entity_ids), "end_time": end_iso,
+                                    "significant_changes_only": "0"})
+        rows = self._http("GET", f"/api/history/period/{urllib.parse.quote(start_iso)}?{q}") or []
+        return [s for series in rows for s in series]
+
+    def logbook(self, start_iso, end_iso):
+        q = urllib.parse.urlencode({"end_time": end_iso})
+        return self._http("GET", f"/api/logbook/{urllib.parse.quote(start_iso)}?{q}") or []
+
+    def update_entity(self, entity_id, **changes):
+        return self.ws_call({"type": "config/entity_registry/update", "entity_id": entity_id, **changes})
+
     def ensure_area(self, name):
         for a in self.ws_call({"type": "config/area_registry/list"}):
             if a["name"] == name:

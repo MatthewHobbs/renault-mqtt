@@ -17,8 +17,8 @@ just e2e 2026.8.1 /path/to/core-checkout --catalog /path/to/alpine_a290/app:cata
 
 Arguments: the HA version (a tag of `ghcr.io/home-assistant/home-assistant`), the core checkout to
 import `renault_mqtt` from (defaults to this repo), and, for scenario (f), each real add-on catalog
-as `SYS_PATH_ENTRY:MODULE`. `--scenarios a,b,c,g,d1,d2,d3,d4,d5,e,f` picks a subset; d3, d4
-and d5 share one HA restart, so naming any of them runs all three. `--e-repeats N` runs
+as `SYS_PATH_ENTRY:MODULE`. `--scenarios a,b,c,g,d1,d2,d3,d4,d5,e,f,m1,m2,m3` picks a subset;
+d3, d4 and d5 share one HA restart, as do m2 and m3, so naming one runs its group. `--e-repeats N` runs
 the one-pass rename N times on fresh devices: it is a race between a tombstone and a config sent
 microseconds apart, so one passing trial could be luck. The harness refuses
 to run if `renault_mqtt` was imported from anywhere other than the path given.
@@ -45,7 +45,8 @@ two concurrent runs need only their own `--http-port` and `--mqtt-port`.
 - **Every scenario device has its own name.** If they shared one, later scenarios would collide
   and gain `_2` suffixes that say nothing about naming.
 - **Each negative has a positive control** that the same instrument can see the positive:
-  - (d1) is the control for (d2).
+  - (d1) is the control for (d2). (d2) also carries `d2/persisted` (the broker kept the retained
+    configs across its restart) and `d2/control` (a new entity from the same core pass registered).
   - (d3) carries a same-moment control, `d3/control`, and records HA's own `Received message on
     <topic> ... b''` line, so "not removed" cannot mean "never arrived".
   - (d5) reads the publisher's retain flag through MQTT 5 retain-as-published; a plain subscriber
@@ -64,16 +65,24 @@ two concurrent runs need only their own `--http-port` and `--mqtt-port`.
 | b | A new `unique_id` without `default_entity_id`, on a device already in an area, gets an area-prefixed id (`garage_…`)? |
 | c | The same, but with `default_entity_id`: is the id exactly `default_entity_id`? Needs a core that emits it. |
 | d1 | HA online: does an empty retained payload remove the entry, for each of sensor, binary_sensor, button and number? |
-| d2 | HA offline when the tombstone is published: is the entry removed after restart? |
+| d2 | A host reboot, as far as it can be reproduced without Supervisor. HA, the add-on and the broker (persistence on) stop; the broker restarts; the core's **own** client (`mqtt_connect`, then `publish_discovery`, as the add-ons' `main.py` does) connects and retires one entity per class **before** HA starts; then HA starts. Is each retired entity removed? Nothing is replayed. |
 | d3 | HA offline for the tombstone, then the same discovery pass re-sent once HA's birth message (`homeassistant/status` = `online`) arrives: is the orphan removed? `d3/control` tombstones a sibling HA *did* discover in this run in the same replay; `d3/manual-entity` then deletes one orphan as the entity dialog's Delete does, and `d3/manual-device` the device as the device page's Delete does. |
 | d4 | As (d3), but the re-send first re-publishes the old config so HA discovers it in this run, then the tombstone pass: `immediate` (back to back), `waited` (until HA logs `Found new component`), `minimal` (resurrect with only `unique_id`, `device` and the required topic), `unretained` (minimal, unretained, back to back). Records the delays and what the broker retains afterwards. |
 | d5 | What HA publishes on `homeassistant/status` at first setup, at a clean stop and on restart, when relative to retained discovery being processed, and whether it is retained. |
 | e | Rename with an unchanged friendly name. Tombstone the old `unique_id` and publish a new one with `default_entity_id` = the old id X: does it get X or `X_2`? Runs as one pass, as two passes (tombstone, wait for removal, publish), and as a no-tombstone control. |
 | g | An entity already registered under a `garage_…` id is re-discovered with `default_entity_id`: renamed or left? Rechecked after the (d2) restart. |
 | f | Plain install (no area) of each real catalog: the full HA-derived id list, and any mismatch with the core's `default_entity_id`. |
+| m1 | Option C's sequence (unretained minimal config, then the empty retained payload) for ids HA never registered, three times. What HA keeps (its deleted-entity record, read from `.storage/core.entity_registry` because no API returns it); whether history or the logbook record the transient entity; and whether a real entity later published with that `unique_id` gets its `default_entity_id` (`m1/later/nodei`, published without one, shows the deleted record's id being restored). Per variant: `spec` (the RFC's minimal config) and `disabled` (plus `enabled_by_default: false`). `m1/count` counts the retirements one pass of the core sends for each real catalog under the endpoints the add-ons' READMEs list as supported. |
+| m2 | Orphans of disabled entities: HA stopped, the core's tombstones published, HA started, then after its birth the sequence per variant. Cases: disabled by default (`dis_`), enabled (`en_`, the control) and disabled by the user (`usr_`); `_orphan` gets nothing after the birth. `m2/online-plain` is the plain tombstone for a disabled entity HA discovered in this run. |
+| m3 | The back-to-back sequence on fresh orphans, 20 per class per variant, one at a time (`sequential`) and as one burst, as the core's pass would send it. |
 
 Scenarios the core under test cannot express are reported `N/A`, not skipped silently. A core
 without `default_entity_id` gets it **injected** in (e) and labelled as simulated.
+
+Expected results depend on what the core under test can do, read from its output
+(`capabilities`): a core that answers HA's birth and resurrects before it tombstones must remove
+the (d2) and (d3) orphans, and one that does neither must leave them. A run fails on any other
+result, so each core is held to its own truth.
 
 ## Version trap: the MQTT config flow
 
