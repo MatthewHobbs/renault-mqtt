@@ -22,6 +22,7 @@ handler — so the dependency stays one-directional with no cycle.
 import asyncio
 import json
 import logging
+import re
 
 import paho.mqtt.client as paho_mqtt
 
@@ -81,6 +82,30 @@ _COMMAND_HANDLER = None
 # on every reconnect (survives a broker restart). Set by the add-on before mqtt_connect().
 _MQTT_CTX = {"supported": None, "dist_unit": None}
 
+_UNSLUGGABLE = re.compile(r"[^\x00-\x7f]|&[#\w]+;")
+_TRACKER_NAME = "Location"
+
+
+def _slug(text):
+    """HA's slugify, for ASCII only: it transliterates non-ASCII and decodes "&...;" references."""
+    text = re.sub(r"(?<=\d),(?=\d)", "", text.lower())
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def _default_entity_id(domain, name):
+    return f"{domain}.{_slug(DEVICE['name'] + ' ' + name)}"
+
+
+def _check_entity_names(catalog):
+    device = catalog.DEVICE["name"]
+    tables = (catalog.SENSORS, catalog.BINARY_SENSORS, catalog.ACTION_BUTTONS, catalog.NUMBERS)
+    for name in [_TRACKER_NAME] + [spec[0] for table in tables for spec in table.values()]:
+        text = f"{device} {name}"
+        if _UNSLUGGABLE.search(text) or not _slug(text):
+            raise ValueError(f"cannot derive Home Assistant's entity id for {text!r}: device and "
+                             "entity names must be plain ASCII, without HTML character references, "
+                             "and contain a letter or digit")
+
 
 def configure(catalog):
     """Inject the add-on's catalog + derive the per-model MQTT identity. Run once at startup, AFTER
@@ -88,6 +113,7 @@ def configure(catalog):
     global _CAT, NODE, DEVICE, _KEEPALIVE, _CLIENT_ID, _DIST_UNIT_OBJS
     global STATE_TOPIC, ATTR_TOPIC, TRACKER_STATE_TOPIC, AVAIL_TOPIC, CMD_PREFIX, PUBLISH_LOCATION
     global ENABLE_REFRESH_LOCATION
+    _check_entity_names(catalog)
     _CAT = catalog
     NODE = catalog.NODE
     DEVICE = catalog.DEVICE
@@ -171,7 +197,9 @@ def publish_discovery(client, supported_eps, dist_unit):
             unit = dist_unit
             if dist_unit == "mi":
                 dev_class = None  # else HA (metric) re-converts our miles back to km
+        # Without default_entity_id HA prefixes a new entity's id with the device's area (r5 #83).
         conf = {"name": name, "object_id": obj, "unique_id": obj,
+                "default_entity_id": _default_entity_id("sensor", name),
                 "state_topic": STATE_TOPIC, "value_template": "{{ value_json.%s }}" % obj.removeprefix(prefix),
                 "availability_topic": AVAIL_TOPIC, "device": DEVICE}
         if dev_class:
@@ -207,6 +235,7 @@ def publish_discovery(client, supported_eps, dist_unit):
         client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
     for obj, (name, dev_class) in cat.BINARY_SENSORS.items():
         conf = {"name": name, "object_id": obj, "unique_id": obj,
+                "default_entity_id": _default_entity_id("binary_sensor", name),
                 "state_topic": STATE_TOPIC, "value_template": "{{ value_json.%s }}" % obj.removeprefix(prefix),
                 "payload_on": "on", "payload_off": "off",
                 "availability_topic": AVAIL_TOPIC, "device": DEVICE}
@@ -233,7 +262,8 @@ def publish_discovery(client, supported_eps, dist_unit):
     client.publish(TRACKER_STATE_TOPIC, TRACKER_PAYLOAD_RESET, retain=True)
     if PUBLISH_LOCATION:
         loc_id = f"{prefix}car_location"
-        tracker = {"name": "Location", "object_id": loc_id, "unique_id": loc_id,
+        tracker = {"name": _TRACKER_NAME, "object_id": loc_id, "unique_id": loc_id,
+                   "default_entity_id": _default_entity_id("device_tracker", _TRACKER_NAME),
                    "json_attributes_topic": ATTR_TOPIC,
                    "availability_topic": AVAIL_TOPIC, "source_type": "gps", "device": DEVICE}
         client.publish(tracker_topic, json.dumps(tracker), retain=True)
@@ -260,6 +290,7 @@ def publish_discovery(client, supported_eps, dist_unit):
         refresh_ok = PUBLISH_LOCATION and ENABLE_REFRESH_LOCATION
         if ep in supported_eps and not (ep == cat.REFRESH_LOCATION_EP and not refresh_ok):
             conf = {"name": name, "object_id": obj, "unique_id": obj,
+                    "default_entity_id": _default_entity_id("button", name),
                     "command_topic": f"{CMD_PREFIX}{cmd}", "availability_topic": AVAIL_TOPIC,
                     "icon": icon, "device": DEVICE}
             client.publish(topic, json.dumps(conf), retain=True)
@@ -278,6 +309,7 @@ def publish_discovery(client, supported_eps, dist_unit):
         topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{short}/config"
         if soc_ok:
             conf = {"name": name, "object_id": obj, "unique_id": obj,
+                    "default_entity_id": _default_entity_id("number", name),
                     "state_topic": STATE_TOPIC, "value_template": "{{ value_json.%s }}" % short,
                     "command_topic": f"{CMD_PREFIX}{short}", "availability_topic": AVAIL_TOPIC,
                     "min": mn, "max": mx, "step": step, "mode": "slider",

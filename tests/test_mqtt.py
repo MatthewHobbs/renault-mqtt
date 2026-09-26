@@ -280,6 +280,106 @@ def test_numbers_published_when_soc_supported_else_cleared():
 
 
 # --------------------------------------------------------------------------- #
+# default_entity_id — the entity id contract
+# --------------------------------------------------------------------------- #
+# Written out by hand rather than computed, so a test cannot agree with a wrong slug by construction.
+_EXPECTED_IDS = {
+    "sensor": {"Battery": "test_car_battery", "Range": "test_car_range", "Pressure": "test_car_pressure",
+               "Plain": "test_car_plain", "Disabled": "test_car_disabled", "Gated": "test_car_gated"},
+    "binary_sensor": {"Plug": "test_car_plug", "Flap": "test_car_flap"},
+    "button": {"Wake": "test_car_wake", "Refresh": "test_car_refresh"},
+    "number": {"SoC Min": "test_car_soc_min"},
+    "device_tracker": {"Location": "test_car_location"},
+}
+
+
+def _published_configs(c):
+    """Every non-empty discovery config, as (domain, conf)."""
+    return [(t.split("/")[1], json.loads(p)) for t, p in c.pub.items()
+            if t.startswith("homeassistant/") and p]
+
+
+def test_every_published_config_pins_the_name_derived_entity_id(monkeypatch):
+    """Without default_entity_id HA builds a NEW entity's id from the device's area and any user
+    rename, so a car device in area "Auto" gets number.auto_r5_soc_max_target (r5 issue #83) and
+    every dashboard reference misses. Every domain must pin the id, including the tracker."""
+    monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", True)
+    monkeypatch.setattr(mqtt, "ENABLE_REFRESH_LOCATION", True)
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+
+    seen = {}
+    for domain, conf in _published_configs(c):
+        assert conf["default_entity_id"] == f"{domain}.{_EXPECTED_IDS[domain][conf['name']]}"
+        assert "object_id" in conf                   # still sent: HA ignores it but accepts it
+        seen.setdefault(domain, set()).add(conf["name"])
+    # Guards the loop above: a domain that published nothing would otherwise pass vacuously.
+    assert seen == {d: set(names) for d, names in _EXPECTED_IDS.items()}
+
+
+def test_default_entity_id_follows_the_name_not_the_object_id():
+    """object_id and the name-derived id differ for ten r5 entities; dashboards use the latter."""
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    conf = json.loads(c.pub["homeassistant/number/test_node/soc_min/config"])
+    assert conf["object_id"] == "tst_soc_min"
+    assert conf["default_entity_id"] == "number.test_car_soc_min"
+
+
+def _configure_with(monkeypatch, device_name, sensor_name):
+    cat = types.SimpleNamespace(**vars(_FAKE_CATALOG))
+    cat.DEVICE = {**_FAKE_CATALOG.DEVICE, "name": device_name}
+    cat.SENSORS = {"tst_x": (sensor_name, None, None, None)}
+    cat.OPTIONAL_ENDPOINTS = {}
+    mqtt.configure(cat)
+
+
+# Expected values are python-slugify 9.0.0's output (the version HA pins) for the same text.
+@pytest.mark.parametrize("device_name,name,expected", [
+    ("R5", "SOC Max Target", "r5_soc_max_target"),            # the id r5 issue #83 lost
+    ("Test Car", "Driver's Door", "test_car_driver_s_door"),   # apostrophe becomes a separator
+    ("Test Car", "A  --  B", "test_car_a_b"),                  # runs of spaces/punctuation collapse
+    ("Mixed CaSe", "SoC Max", "mixed_case_soc_max"),           # lower-cased
+    ("Alpine A290", "Range 2", "alpine_a290_range_2"),         # digits kept
+    ("Test Car", "Trailing!!!", "test_car_trailing"),          # trailing punctuation stripped
+    ("  Test Car", "x", "test_car_x"),                         # leading separators stripped
+    ("Test Car", "1,000 km", "test_car_1000_km"),              # a comma between digits is dropped
+    ("Test Car", "a,b", "test_car_a_b"),                       # ...but not between letters
+    ("Test Car", "under_score", "test_car_under_score"),
+    ("Test Car", 'Quote "x"', "test_car_quote_x"),
+])
+def test_default_entity_id_slug_matches_ha(monkeypatch, device_name, name, expected):
+    _configure_with(monkeypatch, device_name, name)
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    conf = json.loads(c.pub["homeassistant/sensor/test_node/tst_x/config"])
+    assert conf["default_entity_id"] == f"sensor.{expected}"
+
+
+@pytest.mark.parametrize("device_name,table,name", [
+    ("Test Café", None, None),                   # non-ASCII device name
+    ("Test Car", "SENSORS", "Température"),      # non-ASCII entity name, each table
+    ("Test Car", "BINARY_SENSORS", "Prise ⚡"),
+    ("Test Car", "ACTION_BUTTONS", "Klaxon ’"),
+    ("Test Car", "NUMBERS", "Charge ≥"),
+    ("Test Car", "SENSORS", "Tom &amp; Jerry"),  # HA decodes character references first
+    ("Test Car", "SENSORS", "Driver&#39;s"),
+    ("!!!", "SENSORS", "???"),                   # slugs to nothing: HA would say "unknown"
+])
+def test_configure_rejects_a_name_whose_entity_id_it_cannot_derive(monkeypatch, device_name, table, name):
+    """HA transliterates non-ASCII with whichever unidecode backend is installed, and decodes HTML
+    character references before slugging. Neither is reproduced here, so such a name must stop the
+    add-on at startup rather than publish an id that silently differs from HA's."""
+    cat = types.SimpleNamespace(**vars(_FAKE_CATALOG))
+    cat.DEVICE = {**_FAKE_CATALOG.DEVICE, "name": device_name}
+    if table:
+        entry = next(iter(getattr(_FAKE_CATALOG, table).items()))
+        setattr(cat, table, {entry[0]: (name, *entry[1][1:])})
+    with pytest.raises(ValueError, match="entity id"):
+        mqtt.configure(cat)
+
+
+# --------------------------------------------------------------------------- #
 # client wiring + callbacks
 # --------------------------------------------------------------------------- #
 class _FakePaho:

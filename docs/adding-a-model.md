@@ -46,7 +46,7 @@ value-template keys / command suffixes.
 | `OBJ_PREFIX` | `str` | e.g. `"scenic_"`. Prefixes every object_id. |
 | `ENV_PREFIX` | `str` | e.g. `"SCENIC_"`. The env prefix `run.sh` exports options under. |
 | `NODE` | `str` | HA discovery node + MQTT topic root, e.g. `"renault_scenic"`. |
-| `DEVICE` | `dict` | HA device block. **Its `name` drives the entity_id slug** — HA ignores `object_id` and builds `entity_id = slug(device_name + " " + friendly_name)`. Choose deliberately (see §6). |
+| `DEVICE` | `dict` | HA device block. **Its `name` drives the entity_id slug** — HA ignores `object_id`, and the core pins every entity's `default_entity_id` to `<domain>.slug(device_name + " " + entity_name)`, so an entity's name is part of its id contract (plain ASCII only; `configure()` rejects anything else). Choose deliberately (see §6). |
 | `MQTT_KEEPALIVE` | `int` | *Optional*, default `60`. Broker keepalive seconds. |
 | `DIST_UNIT_OBJS` | `tuple[str]` | Sensor object_ids whose unit follows the locale (mi/km) instead of a fixed one. |
 
