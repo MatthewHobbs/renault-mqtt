@@ -59,12 +59,18 @@ value-template keys / command suffixes.
 | `ICONS` | `{object_id: "mdi:…"}` | Optional per-entity icon. |
 | `OPTIONAL_ENDPOINTS` | `{endpoint_name: [object_id, …]}` | Sensors cleared (and skipped) when their endpoint isn't supported by the car. |
 | `RETIRED_SENSORS` | `[object_id, …]` | Ids a previous version shipped; their retained discovery config is cleared on startup. |
+| `RETIRED_BINARY_SENSORS` / `RETIRED_BUTTONS` / `RETIRED_NUMBERS` | `[object_id, …]` | *Optional*, default `()`. The same, for that domain. An id may not be both retired and live in one domain; `configure()` raises. |
 | `DEFAULT_DISABLED_SENSORS` | `{object_id, …}` | Published but disabled in the entity registry by default. |
 | `ACTION_BUTTONS` | `{object_id: (name, icon, endpoint)}` | Control buttons; published only when `endpoint` is supported. |
 | `BUTTON_CMD_OVERRIDES` | `{object_id: cmd_suffix}` | *Optional*, default `{}`. Remap a button's command suffix when it differs from `object_id.removeprefix(OBJ_PREFIX)` (see §6). |
 | `NUMBERS` | `{object_id: (name, icon, min, max, step)}` | Writable sliders; published only when `SOC_ENDPOINT` is supported. |
 | `SOC_ENDPOINT` | `str` | Endpoint gating the charge-limit numbers, e.g. `"soc-levels"`. |
 | `REFRESH_LOCATION_EP` | `str` | The refresh-location action endpoint (also suppresses that button when location is opt-out). |
+
+`unique_id` is the object_id, so renaming an object_id creates a **new** entity: put the old id in
+the matching `RETIRED_*` list, or the old entity is left behind orphaned.
+Retired button and number topics are derived with the **current** `OBJ_PREFIX`, as live ones
+are, so the lists cannot retire ids published under a different prefix: never change `OBJ_PREFIX`.
 
 `CHARGES_ENDPOINT` is **not** a catalog value — it's identical across models and lives in
 `renault_mqtt.charge`; `main.py` imports it for the endpoint-support probe.
