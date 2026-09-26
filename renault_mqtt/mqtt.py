@@ -12,7 +12,8 @@ from the passed catalog:
   * ``MQTT_KEEPALIVE`` — the broker keepalive (optional, default 60);
   * the discovery tables ``SENSORS`` / ``BINARY_SENSORS`` / ``ICONS`` / ``ACTION_BUTTONS`` /
     ``NUMBERS`` / ``OPTIONAL_ENDPOINTS`` / ``RETIRED_SENSORS`` / ``DEFAULT_DISABLED_SENSORS`` and
-    the endpoint names ``SOC_ENDPOINT`` / ``REFRESH_LOCATION_EP``.
+    the endpoint names ``SOC_ENDPOINT`` / ``REFRESH_LOCATION_EP``;
+  * optionally ``RETIRED_BINARY_SENSORS`` / ``RETIRED_BUTTONS`` / ``RETIRED_NUMBERS``.
 
 The one edge that would otherwise point back at the add-on's poll loop (an inbound command must run
 the add-on's async run_command on the event loop) is inverted via injection: the add-on sets
@@ -107,6 +108,30 @@ def _check_entity_names(catalog):
                              "and contain a letter or digit")
 
 
+# (discovery domain, live table, retired list). Only RETIRED_SENSORS is required of a catalog.
+_RETIRABLE = (("sensor", "SENSORS", "RETIRED_SENSORS"),
+              ("binary_sensor", "BINARY_SENSORS", "RETIRED_BINARY_SENSORS"),
+              ("button", "ACTION_BUTTONS", "RETIRED_BUTTONS"),
+              ("number", "NUMBERS", "RETIRED_NUMBERS"))
+
+
+def _topic_segment(domain, obj, prefix):
+    # Must match the live publish in publish_discovery: buttons and numbers are keyed by the
+    # stripped id. A tombstone on the other form clears a topic nothing published, silently.
+    return obj.removeprefix(prefix) if domain in ("button", "number") else obj
+
+
+def _check_retired(catalog):
+    # Retired and live on one topic means one pass publishes both, and publish order decides
+    # whether the entity survives. Compared per domain: an id may legitimately move domain.
+    for domain, live, retired in _RETIRABLE:
+        segs = [{_topic_segment(domain, o, catalog.OBJ_PREFIX) for o in getattr(catalog, name, ())}
+                for name in (retired, live)]
+        if clash := segs[0] & segs[1]:
+            raise ValueError(f"{retired} names {domain} topic(s) {sorted(clash)} that {live} "
+                             "still publishes")
+
+
 def configure(catalog):
     """Inject the add-on's catalog + derive the per-model MQTT identity. Run once at startup, AFTER
     config.ENV_PREFIX is injected (the option flags are read here under that prefix)."""
@@ -114,6 +139,7 @@ def configure(catalog):
     global STATE_TOPIC, ATTR_TOPIC, TRACKER_STATE_TOPIC, AVAIL_TOPIC, CMD_PREFIX, PUBLISH_LOCATION
     global ENABLE_REFRESH_LOCATION
     _check_entity_names(catalog)
+    _check_retired(catalog)
     _CAT = catalog
     NODE = catalog.NODE
     DEVICE = catalog.DEVICE
@@ -188,6 +214,13 @@ def publish_discovery(client, supported_eps, dist_unit):
     if cat.RETIRED_SENSORS:
         LOG.debug("Sensors cleared (retired in this build, dashboards must not reference them "
                   "as sensor.*): %s", sorted(cat.RETIRED_SENSORS))
+    for domain, _, attr in _RETIRABLE[1:]:
+        retired = getattr(cat, attr, ())
+        for obj in retired:
+            seg = _topic_segment(domain, obj, prefix)
+            client.publish(f"{DISCOVERY_PREFIX}/{domain}/{NODE}/{seg}/config", "", retain=True)
+        if retired:
+            LOG.debug("Retired %s configs cleared: %s", domain, sorted(retired))
     published = 0
     for obj, (name, dev_class, unit, state_class) in cat.SENSORS.items():
         if obj in skip:
