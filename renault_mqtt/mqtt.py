@@ -116,8 +116,8 @@ _RETIRABLE = (("sensor", "SENSORS", "RETIRED_SENSORS"),
 
 
 def _topic_segment(domain, obj, prefix):
-    # Must match the live publish in publish_discovery: buttons and numbers are keyed by the
-    # stripped id. A tombstone on the other form clears a topic nothing published, silently.
+    # The one derivation for live configs and tombstones alike: buttons and numbers are keyed by
+    # the stripped id. A tombstone on the other form would clear a topic nothing published.
     return obj.removeprefix(prefix) if domain in ("button", "number") else obj
 
 
@@ -265,7 +265,8 @@ def publish_discovery(client, supported_eps, dist_unit):
                                     + key + " not in ('', none) %}online{% else %}offline{% endif %}")},
             ]
             conf["availability_mode"] = "all"
-        client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
+        client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{_topic_segment('sensor', obj, prefix)}/config",
+                       json.dumps(conf), retain=True)
     for obj, (name, dev_class) in cat.BINARY_SENSORS.items():
         conf = {"name": name, "object_id": obj, "unique_id": obj,
                 "default_entity_id": _default_entity_id("binary_sensor", name),
@@ -276,7 +277,8 @@ def publish_discovery(client, supported_eps, dist_unit):
             conf["device_class"] = dev_class
         if obj in cat.ICONS:
             conf["icon"] = cat.ICONS[obj]
-        client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
+        client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/{_topic_segment('binary_sensor', obj, prefix)}/config",
+                       json.dumps(conf), retain=True)
     tracker_topic = f"{DISCOVERY_PREFIX}/device_tracker/{NODE}/location/config"
     # The tracker deliberately declares NO state topic. Home Assistant derives home/away and the zone
     # name from the lat/lon on json_attributes_topic, but only while location_name is None; a
@@ -315,7 +317,7 @@ def publish_discovery(client, supported_eps, dist_unit):
     for obj, (name, icon, ep) in cat.ACTION_BUTTONS.items():
         short = obj.removeprefix(prefix)
         cmd = cmd_overrides.get(obj, short)
-        topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{short}/config"
+        topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{_topic_segment('button', obj, prefix)}/config"
         # The refresh-location button is withheld unless the user opted in AND location publishing
         # is on. The else-branch below publishes a zero-length retained payload, which is what makes
         # Home Assistant delete an entity an existing install already has — so an upgrade removes
@@ -339,7 +341,7 @@ def publish_discovery(client, supported_eps, dist_unit):
                  "%s will not exist on this vehicle", cat.SOC_ENDPOINT, sorted(cat.NUMBERS))
     for obj, (name, icon, mn, mx, step) in cat.NUMBERS.items():
         short = obj.removeprefix(prefix)
-        topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{short}/config"
+        topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{_topic_segment('number', obj, prefix)}/config"
         if soc_ok:
             conf = {"name": name, "object_id": obj, "unique_id": obj,
                     "default_entity_id": _default_entity_id("number", name),
