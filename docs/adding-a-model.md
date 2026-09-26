@@ -69,6 +69,8 @@ value-template keys / command suffixes.
 
 `unique_id` is the object_id, so renaming an object_id creates a **new** entity: put the old id in
 the matching `RETIRED_*` list, or the old entity is left behind orphaned.
+Retired button and number topics are derived with the **current** `OBJ_PREFIX`, as live ones
+are, so the lists cannot retire ids published under a different prefix: never change `OBJ_PREFIX`.
 
 `CHARGES_ENDPOINT` is **not** a catalog value — it's identical across models and lives in
 `renault_mqtt.charge`; `main.py` imports it for the endpoint-support probe.
