@@ -12,7 +12,8 @@ from the passed catalog:
   * ``MQTT_KEEPALIVE`` — the broker keepalive (optional, default 60);
   * the discovery tables ``SENSORS`` / ``BINARY_SENSORS`` / ``ICONS`` / ``ACTION_BUTTONS`` /
     ``NUMBERS`` / ``OPTIONAL_ENDPOINTS`` / ``RETIRED_SENSORS`` / ``DEFAULT_DISABLED_SENSORS`` and
-    the endpoint names ``SOC_ENDPOINT`` / ``REFRESH_LOCATION_EP``.
+    the endpoint names ``SOC_ENDPOINT`` / ``REFRESH_LOCATION_EP``;
+  * optionally ``RETIRED_BINARY_SENSORS`` / ``RETIRED_BUTTONS`` / ``RETIRED_NUMBERS``.
 
 The one edge that would otherwise point back at the add-on's poll loop (an inbound command must run
 the add-on's async run_command on the event loop) is inverted via injection: the add-on sets
@@ -107,6 +108,30 @@ def _check_entity_names(catalog):
                              "and contain a letter or digit")
 
 
+# (discovery domain, live table, retired list). Only RETIRED_SENSORS is required of a catalog.
+_RETIRABLE = (("sensor", "SENSORS", "RETIRED_SENSORS"),
+              ("binary_sensor", "BINARY_SENSORS", "RETIRED_BINARY_SENSORS"),
+              ("button", "ACTION_BUTTONS", "RETIRED_BUTTONS"),
+              ("number", "NUMBERS", "RETIRED_NUMBERS"))
+
+
+def _topic_segment(domain, obj, prefix):
+    # The one derivation for live configs and tombstones alike: buttons and numbers are keyed by
+    # the stripped id. A tombstone on the other form would clear a topic nothing published.
+    return obj.removeprefix(prefix) if domain in ("button", "number") else obj
+
+
+def _check_retired(catalog):
+    # Retired and live on one topic means one pass publishes both, and publish order decides
+    # whether the entity survives. Compared per domain: an id may legitimately move domain.
+    for domain, live, retired in _RETIRABLE:
+        segs = [{_topic_segment(domain, o, catalog.OBJ_PREFIX) for o in getattr(catalog, name, ())}
+                for name in (retired, live)]
+        if clash := segs[0] & segs[1]:
+            raise ValueError(f"{retired} names {domain} topic(s) {sorted(clash)} that {live} "
+                             "still publishes")
+
+
 def configure(catalog):
     """Inject the add-on's catalog + derive the per-model MQTT identity. Run once at startup, AFTER
     config.ENV_PREFIX is injected (the option flags are read here under that prefix)."""
@@ -114,6 +139,7 @@ def configure(catalog):
     global STATE_TOPIC, ATTR_TOPIC, TRACKER_STATE_TOPIC, AVAIL_TOPIC, CMD_PREFIX, PUBLISH_LOCATION
     global ENABLE_REFRESH_LOCATION
     _check_entity_names(catalog)
+    _check_retired(catalog)
     _CAT = catalog
     NODE = catalog.NODE
     DEVICE = catalog.DEVICE
@@ -188,6 +214,13 @@ def publish_discovery(client, supported_eps, dist_unit):
     if cat.RETIRED_SENSORS:
         LOG.debug("Sensors cleared (retired in this build, dashboards must not reference them "
                   "as sensor.*): %s", sorted(cat.RETIRED_SENSORS))
+    for domain, _, attr in _RETIRABLE[1:]:
+        retired = getattr(cat, attr, ())
+        for obj in retired:
+            seg = _topic_segment(domain, obj, prefix)
+            client.publish(f"{DISCOVERY_PREFIX}/{domain}/{NODE}/{seg}/config", "", retain=True)
+        if retired:
+            LOG.debug("Retired %s configs cleared: %s", domain, sorted(retired))
     published = 0
     for obj, (name, dev_class, unit, state_class) in cat.SENSORS.items():
         if obj in skip:
@@ -232,7 +265,8 @@ def publish_discovery(client, supported_eps, dist_unit):
                                     + key + " not in ('', none) %}online{% else %}offline{% endif %}")},
             ]
             conf["availability_mode"] = "all"
-        client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
+        client.publish(f"{DISCOVERY_PREFIX}/sensor/{NODE}/{_topic_segment('sensor', obj, prefix)}/config",
+                       json.dumps(conf), retain=True)
     for obj, (name, dev_class) in cat.BINARY_SENSORS.items():
         conf = {"name": name, "object_id": obj, "unique_id": obj,
                 "default_entity_id": _default_entity_id("binary_sensor", name),
@@ -243,7 +277,8 @@ def publish_discovery(client, supported_eps, dist_unit):
             conf["device_class"] = dev_class
         if obj in cat.ICONS:
             conf["icon"] = cat.ICONS[obj]
-        client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/{obj}/config", json.dumps(conf), retain=True)
+        client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/{_topic_segment('binary_sensor', obj, prefix)}/config",
+                       json.dumps(conf), retain=True)
     tracker_topic = f"{DISCOVERY_PREFIX}/device_tracker/{NODE}/location/config"
     # The tracker deliberately declares NO state topic. Home Assistant derives home/away and the zone
     # name from the lat/lon on json_attributes_topic, but only while location_name is None; a
@@ -282,7 +317,7 @@ def publish_discovery(client, supported_eps, dist_unit):
     for obj, (name, icon, ep) in cat.ACTION_BUTTONS.items():
         short = obj.removeprefix(prefix)
         cmd = cmd_overrides.get(obj, short)
-        topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{short}/config"
+        topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{_topic_segment('button', obj, prefix)}/config"
         # The refresh-location button is withheld unless the user opted in AND location publishing
         # is on. The else-branch below publishes a zero-length retained payload, which is what makes
         # Home Assistant delete an entity an existing install already has — so an upgrade removes
@@ -306,7 +341,7 @@ def publish_discovery(client, supported_eps, dist_unit):
                  "%s will not exist on this vehicle", cat.SOC_ENDPOINT, sorted(cat.NUMBERS))
     for obj, (name, icon, mn, mx, step) in cat.NUMBERS.items():
         short = obj.removeprefix(prefix)
-        topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{short}/config"
+        topic = f"{DISCOVERY_PREFIX}/number/{NODE}/{_topic_segment('number', obj, prefix)}/config"
         if soc_ok:
             conf = {"name": name, "object_id": obj, "unique_id": obj,
                     "default_entity_id": _default_entity_id("number", name),

@@ -543,3 +543,105 @@ def test_data_gating_is_optional_for_a_catalog_that_omits_it():
         assert conf["availability_topic"] == "test_node/availability"   # falls back cleanly
     finally:
         mqtt._CAT = cat
+
+
+# --------------------------------------------------------------------------- #
+# retiring binary_sensor / button / number discovery
+# --------------------------------------------------------------------------- #
+# (domain, live table, retired list, an id the fake catalog publishes live in that domain)
+_RETIRABLE = [
+    ("sensor", "SENSORS", "RETIRED_SENSORS", "tst_battery"),
+    ("binary_sensor", "BINARY_SENSORS", "RETIRED_BINARY_SENSORS", "tst_plug"),
+    ("button", "ACTION_BUTTONS", "RETIRED_BUTTONS", "tst_wake"),
+    ("number", "NUMBERS", "RETIRED_NUMBERS", "tst_soc_min"),
+]
+_NEW_RETIRABLE = _RETIRABLE[1:]
+
+
+def _catalog(**overrides):
+    return types.SimpleNamespace(**{**vars(_FAKE_CATALOG), **overrides})
+
+
+def _live_topic(obj):
+    """The topic that carried `obj`'s live config, read off a real publish rather than re-derived,
+    so a tombstone derived differently (full id vs prefix-stripped) cannot agree with it by accident."""
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    return next(t for t, p, _ in c.log
+                if t.startswith("homeassistant/") and p and json.loads(p).get("object_id") == obj)
+
+
+def _retire(table, attr, obj):
+    """The fake catalog with `obj` moved out of its live table into `attr`, as a rename does."""
+    return _catalog(**{table: {k: v for k, v in getattr(_FAKE_CATALOG, table).items() if k != obj},
+                       attr: [obj]})
+
+
+@pytest.mark.parametrize("domain,table,attr,obj", _NEW_RETIRABLE)
+def test_retired_id_is_tombstoned_on_the_topic_it_was_published_on(domain, table, attr, obj):
+    live = _live_topic(obj)
+    assert f"/{domain}/" in live
+    mqtt.configure(_retire(table, attr, obj))
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    # Exactly one zero-length RETAINED write: that is what makes HA delete the entity.
+    assert c.writes(live) == [("", True)]
+
+
+def test_retired_tombstones_precede_every_live_config():
+    """A rename tombstones the old unique_id and publishes the new one in the same pass. Whether HA
+    hands the freed entity_id to the new entity may depend on the old one being gone first."""
+    mqtt.configure(_catalog(**{attr: [f"tst_gone_{domain}"] for domain, _, attr, _ in _RETIRABLE}))
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    tombs = [c.index_of(t, "") for t in (
+        "homeassistant/sensor/test_node/tst_gone_sensor/config",
+        "homeassistant/binary_sensor/test_node/tst_gone_binary_sensor/config",
+        "homeassistant/button/test_node/gone_button/config",
+        "homeassistant/number/test_node/gone_number/config")]
+    first_live = next(i for i, (t, p, _) in enumerate(c.log) if t.startswith("homeassistant/") and p)
+    assert max(tombs) < first_live
+
+
+@pytest.mark.parametrize("domain,table,attr,obj", _RETIRABLE)
+def test_retired_id_that_is_still_live_is_rejected(domain, table, attr, obj):
+    with pytest.raises(ValueError, match=obj.removeprefix("tst_")):
+        mqtt.configure(_catalog(**{attr: [obj]}))
+
+
+@pytest.mark.parametrize("domain,table,attr,obj", [r for r in _RETIRABLE if r[0] in ("button", "number")])
+def test_retired_id_clashing_on_the_stripped_topic_is_rejected(domain, table, attr, obj):
+    # Buttons and numbers are keyed by the stripped id, so "wake" and "tst_wake" share one topic.
+    with pytest.raises(ValueError):
+        mqtt.configure(_catalog(**{attr: [obj.removeprefix("tst_")]}))
+
+
+def test_an_id_retired_in_one_domain_may_be_live_in_another():
+    """Both add-ons ship this: soc_min moved from SENSORS to NUMBERS, so its sensor config is
+    retired while the number is live. Different topics, so it must not trip the guard."""
+    mqtt.configure(_catalog(RETIRED_SENSORS=["tst_soc_min"]))
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    assert c.writes("homeassistant/sensor/test_node/tst_soc_min/config") == [("", True)]
+    assert json.loads(c.pub["homeassistant/number/test_node/soc_min/config"])["object_id"] == "tst_soc_min"
+
+
+def test_retired_ids_are_named_in_the_log(caplog):
+    import logging
+    mqtt.configure(_catalog(**{attr: [f"tst_gone_{domain}"] for domain, _, attr, _ in _NEW_RETIRABLE}))
+    with caplog.at_level(logging.DEBUG, logger="renault_mqtt.mqtt"):
+        mqtt.publish_discovery(StubClient(), _ALL_EPS, "km")
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    for domain, _, _, _ in _NEW_RETIRABLE:
+        assert any(f"tst_gone_{domain}" in m and f"{domain} " in m for m in debug), domain
+
+
+def test_new_retired_lists_are_optional():
+    """a290's catalog sets none of them: discovery must publish no extra tombstones."""
+    assert not any(hasattr(_FAKE_CATALOG, attr) for _, _, attr, _ in _NEW_RETIRABLE)
+    c = StubClient()
+    mqtt.publish_discovery(c, _ALL_EPS, "km")
+    cleared = sorted(t for t, p, _ in c.log if p == "" and t.startswith("homeassistant/"))
+    assert cleared == ["homeassistant/button/test_node/forbidden/config",
+                       "homeassistant/button/test_node/refresh/config",
+                       "homeassistant/sensor/test_node/tst_old/config"]
