@@ -1,6 +1,6 @@
 # ADR 0001 — Pin entity ids with default_entity_id
 
-- **Status:** Accepted 2026-09-26 by the owner, after row 2's end-to-end results were recorded.
+- **Status:** Accepted 2026-09-26. I accepted it once row 2's end-to-end results were recorded.
 - **Context:** r5-ha-addon issue #83: `number.auto_r5_soc_max_target` instead of
   `number.r5_soc_max_target`, because Home Assistant put the device's area into a new entity's
   id. Proposed as [RFC 0005: pin MQTT entity ids with default_entity_id](https://claude.ai/code/artifact/e4bf159f-2c74-4efd-a64c-aa29e68c914f).
@@ -16,7 +16,7 @@ The core sends `default_entity_id` in every discovery config it publishes (senso
 button, number and the device_tracker), set to the **name-derived** id,
 `<domain>.<slug(device name + " " + entity name)>`, and keeps sending `object_id`.
 
-Decisions the owner confirmed on 2026-09-26:
+Decisions I confirmed on 2026-09-26:
 
 1. **Option A** of RFC 0005 (see Alternatives).
 2. **The minimum supported Home Assistant is 2026.8.1**, which both add-ons declare in
