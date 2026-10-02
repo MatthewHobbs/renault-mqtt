@@ -1,6 +1,6 @@
 # renault-mqtt
 
-Global rules (signed commits, trunk/merge policy, Conventional Commits, tiers) live in
+Global rules (signed commits, trunk/merge policy, Conventional Commits, data class and audience) live in
 `~/.claude/CLAUDE.md`; this file is renault-mqtt specifics only.
 
 This is the shared core behind the sibling add-ons **`MatthewHobbs/a290-ha-addon`** and
