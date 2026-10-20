@@ -116,7 +116,7 @@ def test_prefer_real_charge_matches_same_session_within_tolerance():
     assert charge._prefer_real_charge(real, {}) is True        # nothing inferred yet -> use endpoint
     assert charge._prefer_real_charge({}, real) is False       # no endpoint data -> keep inferred
     # endpoint's actual stop is a few minutes BEFORE the inferred (observed) stop -> same
-    # session, authoritative record still wins (the bug codex caught: strict >= rejected this)
+    # session, authoritative record still wins (strict >= wrongly rejected this)
     live_observed_later = {"last_charge_end": "2026-06-21T02:05:00+00:00"}   # +5 min
     assert charge._prefer_real_charge(real, live_observed_later) is True
     # a live session ending materially later (hours) is a fresh charge not yet posted -> keep it

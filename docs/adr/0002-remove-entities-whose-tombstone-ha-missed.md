@@ -5,12 +5,11 @@
 - **Context:** the core retires an entity by publishing an empty retained payload to its discovery
   topic. If Home Assistant is not running at that moment, it never sees the tombstone and the
   entity stays `unavailable` in the registry indefinitely. Proposed as
-  [RFC 0009: remove entities whose tombstone Home Assistant missed](https://claude.ai/code/artifact/bd0ea77a-03ad-49cb-9a96-fdb47a95531a).
+  RFC 0009: remove entities whose tombstone Home Assistant missed.
 - **North star:** an entity the core has retired does not linger as a permanent orphan just
   because Home Assistant happened to be down at the moment of retirement.
 
-<!-- Format: claude-config docs/adr/0000-template.md, referenced at source rather than copied.
-The Decision table is the plan and is kept current; the rest is the dated record. -->
+<!-- The Decision table is the plan and is kept current; the rest is the dated record. -->
 
 ## Decision
 
@@ -40,7 +39,7 @@ Decisions I confirmed on 2026-09-26 (RFC 0009's decision log):
 | 1 | Gate: four measurements (M1–M4) on HA 2026.8.1 and 2026.9.3, comparing plain C against C2 | renault-mqtt (e2e harness) | Done | 2026-09-26, branch `fix-offline-tombstones` `eb6e060`: see "Gate results" below |
 | 2 | `mqtt.py`: subscribe to `homeassistant/status`, re-publish discovery on `online`; every retirement sent as C2's minimal config then the empty payload; unit tests written first and shown to fail | renault-mqtt | Done | `a214673` (failing tests), `8cd6853` (implementation) |
 | 3 | End-to-end confirmation on both declared HA versions | renault-mqtt (e2e harness) | Done | 2026-09-26, HA 2026.8.1 and 2026.9.3, core `37f8114`: see "End-to-end results" below |
-| 4 | Dual review (this repo is Public: Claude + Codex, reconciled) | renault-mqtt | Done | 2026-09-26: see "Dual review" below |
+| 4 | Independent second review, reconciled with my own | renault-mqtt | Done | 2026-09-26: see "Second review" below |
 | 5 | Core release: `__version__` bump in its own PR; the release workflow tags it | renault-mqtt | Open | |
 | 6 | a290-ha-addon: `CORE_REF` bump, patch release, container boot | a290-ha-addon | Open | |
 | 7 | r5-ha-addon: the same, after row 6 | r5-ha-addon | Open | |
@@ -181,19 +180,18 @@ before HA starts) and `d3` (HA offline for the tombstone, then the same pass re-
 birth message arrives) both showed every domain — sensor, binary_sensor, button, number —
 `REMOVED` on both HA versions, which is the check the gate said must flip for C2 to be accepted.
 
-## Dual review (2026-09-26)
+## Second review (2026-09-26)
 
-This repo is Public, so the one review rule ran as Claude's own pass plus Codex's (`just
-review-diff`), reconciled. Two passes, since the first fix changed the head SHA and the rule
-requires reviewing the SHA that merges:
+An independent second review ran alongside my own, and the two were reconciled. More than one
+pass, since each fix changed the head SHA and the rule requires reviewing the SHA that merges:
 
-1. **First pass**, against `8b73b54`: Codex found the e2e harness's status watcher was armed only
+1. **First pass**, against `8b73b54`: the second review found the e2e harness's status watcher was armed only
    when `d5` was explicitly named, so a `--scenarios d3` or `--scenarios d4` run — which still
    reports `d5`'s rows, since they share one HA restart — would false-fail on `d5/first-setup`.
    My own pass agreed: `git diff` confirmed this condition was introduced by this branch's own
    commits, not pre-existing. **Fixed** in `ee5a4ab` and verified directly: `--scenarios d3` on
    HA 2026.9.3 gave 27/27 rows as expected, `d5/first-setup: SEEN`.
-2. **Second pass**, against the fixed head: Codex found the device_tracker's location opt-out
+2. **Second pass**, against the fixed head: the second review found the device_tracker's location opt-out
    (`PUBLISH_LOCATION=false`) still tombstoned with a plain empty payload, missing the exact fix
    this ADR is about, for the one entity every install has by default. My own pass agreed — it is
    a retirement in the RFC's sense, just not one of the four `_RETIRABLE` domains the gate
@@ -202,7 +200,7 @@ requires reviewing the SHA that merges:
    its unit test rest on the same mechanism the other four domains already proved, not on a fresh
    measurement of this specific path.
 
-3. **Third pass**, against the fixed head: Codex found the birth-message subscription is hard-coded
+3. **Third pass**, against the fixed head: the second review found the birth-message subscription is hard-coded
    to the default topic and payload, and HA supports customizing (or disabling) both, so such a
    user only gets the add-on's own reconnect recovery, not the birth-triggered one. This is real,
    but it is not a new defect: RFC 0009's own "Other risks" already named the topic case as an
@@ -215,8 +213,7 @@ fixed and re-verified. The third restates a risk already accepted at the RFC sta
 
 ## References
 
-- RFC 0009: remove entities whose tombstone Home Assistant missed:
-  https://claude.ai/code/artifact/bd0ea77a-03ad-49cb-9a96-fdb47a95531a
+- RFC 0009: remove entities whose tombstone Home Assistant missed (not published).
 - ADR 0001: pin entity ids with default_entity_id (row 5: r5's rename order)
 - HA `homeassistant/components/mqtt/discovery.py`, read at 2026.8.1 and 2026.9.3 (identical).
 - HA `homeassistant/components/mqtt/number.py` schema (`command_topic` required, `state_topic`

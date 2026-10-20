@@ -212,6 +212,6 @@ added while wiring the R5.
 - [ ] Container builds via `git+https` with **no unpinned PyPI fetch**, boots, `/healthz` → 200,
       discovery published.
 - [ ] If entity-name-sensitive: **byte-identical discovery diff** vs the reference.
-- [ ] Dual review (Claude + codex) reconciled.
+- [ ] Second review reconciled.
 - [ ] `config.yaml` version + `CHANGELOG.md` entry.
 - [ ] Add-on pins the current core SHA; both/all add-ons in lockstep.

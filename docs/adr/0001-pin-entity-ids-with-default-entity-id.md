@@ -3,12 +3,11 @@
 - **Status:** Accepted 2026-09-26. I accepted it once row 2's end-to-end results were recorded.
 - **Context:** r5-ha-addon issue #83: `number.auto_r5_soc_max_target` instead of
   `number.r5_soc_max_target`, because Home Assistant put the device's area into a new entity's
-  id. Proposed as [RFC 0005: pin MQTT entity ids with default_entity_id](https://claude.ai/code/artifact/e4bf159f-2c74-4efd-a64c-aa29e68c914f).
+  id. Proposed as RFC 0005: pin MQTT entity ids with default_entity_id.
 - **North star:** every entity the add-ons publish gets the same id on every install, whatever
   area or name the user gives the car's device, and that id is the one the dashboards and docs use.
 
-<!-- Format: claude-config docs/adr/0000-template.md, referenced at source rather than copied.
-The Decision table is the plan and is kept current; the rest is the dated record. -->
+<!-- The Decision table is the plan and is kept current; the rest is the dated record. -->
 
 ## Decision
 
@@ -170,8 +169,7 @@ tests, not on a running HA. HA 2026.7.1 and the add-ons' own images were not run
 
 ## References
 
-- RFC 0005: pin MQTT entity ids with default_entity_id:
-  https://claude.ai/code/artifact/e4bf159f-2c74-4efd-a64c-aa29e68c914f
+- RFC 0005: pin MQTT entity ids with default_entity_id (not published).
 - r5-ha-addon issue #83: https://github.com/MatthewHobbs/r5-ha-addon/issues/83
 - HA `homeassistant/util/__init__.py` `slugify`, read at dev `cbda41f` (2026-09-26);
   last commit touching the file `eae809a`.

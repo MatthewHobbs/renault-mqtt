@@ -1,14 +1,11 @@
-# renault-mqtt
-
-Global rules (signed commits, trunk/merge policy, Conventional Commits, data class and audience) live in
-`~/.claude/CLAUDE.md`; this file is renault-mqtt specifics only.
+# Releasing
 
 This is the shared core behind the sibling add-ons **`MatthewHobbs/a290-ha-addon`** and
 **`MatthewHobbs/r5-ha-addon`**, which pin it by immutable commit SHA in their Dockerfiles
 (`ARG CORE_REF`). A change here reaches users only once those repos bump that pin and cut their
 own release, so "merged here" is never "shipped".
 
-## Releasing
+## Version and tag
 
 `__version__` in `renault_mqtt/__init__.py` is the single source of truth — `pyproject.toml`
 reads it via `version = { attr = "renault_mqtt.__version__" }`. Bump it in the PR that ships the

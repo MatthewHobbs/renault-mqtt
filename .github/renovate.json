@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
     "Renovate owns every dependency in this repo. There is no Dependabot config here, so there is nothing to divide ownership with and no risk of duplicate PRs.",
-    "The add-ons pin this repo by commit SHA and track it by tag, so a dependency change here does not reach users until a release is tagged and those pins are bumped. See CLAUDE.md."
+    "The add-ons pin this repo by commit SHA and track it by tag, so a dependency change here does not reach users until a release is tagged and those pins are bumped. See docs/releasing.md."
   ],
   "extends": [
     "config:recommended",

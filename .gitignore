@@ -17,5 +17,3 @@ dist/
 htmlcov/
 .pytest_cache/
 
-# Claude Code worktrees
-.claude/worktrees/
