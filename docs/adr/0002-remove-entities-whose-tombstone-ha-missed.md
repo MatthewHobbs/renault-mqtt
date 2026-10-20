@@ -21,7 +21,7 @@ support), across all four domains, is sent as an **unretained minimal config** �
 by the ordinary empty retained payload, instead of the empty payload alone. The device_tracker's
 location opt-out (`PUBLISH_LOCATION=false`) is retired the same way, keyed on
 `json_attributes_topic` rather than `state_topic`/`command_topic`, since it is also a retirement
-in the RFC's sense (dual review, row 2 below).
+in the RFC's sense (second review, pass 2 below).
 
 Decisions I confirmed on 2026-09-26 (RFC 0009's decision log):
 
@@ -39,7 +39,7 @@ Decisions I confirmed on 2026-09-26 (RFC 0009's decision log):
 | 1 | Gate: four measurements (M1–M4) on HA 2026.8.1 and 2026.9.3, comparing plain C against C2 | renault-mqtt (e2e harness) | Done | 2026-09-26, branch `fix-offline-tombstones` `eb6e060`: see "Gate results" below |
 | 2 | `mqtt.py`: subscribe to `homeassistant/status`, re-publish discovery on `online`; every retirement sent as C2's minimal config then the empty payload; unit tests written first and shown to fail | renault-mqtt | Done | `a214673` (failing tests), `8cd6853` (implementation) |
 | 3 | End-to-end confirmation on both declared HA versions | renault-mqtt (e2e harness) | Done | 2026-09-26, HA 2026.8.1 and 2026.9.3, core `37f8114`: see "End-to-end results" below |
-| 4 | Independent second review, reconciled with my own | renault-mqtt | Done | 2026-09-26: see "Second review" below |
+| 4 | Two independent reviews, reconciled | renault-mqtt | Done | 2026-09-26: see "Second review" below |
 | 5 | Core release: `__version__` bump in its own PR; the release workflow tags it | renault-mqtt | Open | |
 | 6 | a290-ha-addon: `CORE_REF` bump, patch release, container boot | a290-ha-addon | Open | |
 | 7 | r5-ha-addon: the same, after row 6 | r5-ha-addon | Open | |
@@ -182,18 +182,18 @@ birth message arrives) both showed every domain — sensor, binary_sensor, butto
 
 ## Second review (2026-09-26)
 
-An independent second review ran alongside my own, and the two were reconciled. More than one
-pass, since each fix changed the head SHA and the rule requires reviewing the SHA that merges:
+Two independent reviews ran and were reconciled. More than one pass, since each fix changed
+the head SHA and every review must be of the SHA that merges:
 
 1. **First pass**, against `8b73b54`: the second review found the e2e harness's status watcher was armed only
    when `d5` was explicitly named, so a `--scenarios d3` or `--scenarios d4` run — which still
    reports `d5`'s rows, since they share one HA restart — would false-fail on `d5/first-setup`.
-   My own pass agreed: `git diff` confirmed this condition was introduced by this branch's own
+   The other review agreed: `git diff` confirmed this condition was introduced by this branch's own
    commits, not pre-existing. **Fixed** in `ee5a4ab` and verified directly: `--scenarios d3` on
    HA 2026.9.3 gave 27/27 rows as expected, `d5/first-setup: SEEN`.
 2. **Second pass**, against the fixed head: the second review found the device_tracker's location opt-out
    (`PUBLISH_LOCATION=false`) still tombstoned with a plain empty payload, missing the exact fix
-   this ADR is about, for the one entity every install has by default. My own pass agreed — it is
+   this ADR is about, for the one entity every install has by default. The other review agreed — it is
    a retirement in the RFC's sense, just not one of the four `_RETIRABLE` domains the gate
    measured. **Fixed**: the opt-out path now uses the same `_tombstone()` helper, keyed on
    `json_attributes_topic`. Not run through the e2e harness (see Open items above) — the fix and
