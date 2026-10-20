@@ -512,7 +512,7 @@ def test_on_message_ignores_non_command_and_unwired(monkeypatch):
     calls = []
     monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe", lambda *a: calls.append(a))
     # not wired -> ignored
-    mqtt._on_message(None, None, types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"",
+    mqtt._on_message(None, None, types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"go",
                                                        retain=False))
     # wired but wrong topic -> ignored
     monkeypatch.setattr(mqtt, "_LOOP", object())

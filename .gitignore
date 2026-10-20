@@ -16,6 +16,3 @@ dist/
 .coverage
 htmlcov/
 .pytest_cache/
-
-# Local `just ci` virtualenv (uv)
-.venv/
