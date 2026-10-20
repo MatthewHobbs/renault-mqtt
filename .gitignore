@@ -17,8 +17,5 @@ dist/
 htmlcov/
 .pytest_cache/
 
-# Local `just ci` virtualenv (uv)
-.venv/
-
 # Claude Code worktrees
 .claude/worktrees/

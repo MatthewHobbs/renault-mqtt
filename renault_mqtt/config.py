@@ -1,6 +1,6 @@
 """Config reading + secret-redaction primitives shared by the Renault-platform add-ons.
 
-A leaf seam: it imports nothing else in the package, so every other module (main, debug, mqtt,
+A leaf seam: it imports nothing else in the package, so every other module (debug, mqtt,
 charge) can depend on it without an import cycle. It holds add-on option reading (`cfg`,
 `_opt_flag`) and the secret-redaction net (`redact` / `_RedactingFilter` / `_config_secrets`)
 plus the auto-discovered account id those mask.

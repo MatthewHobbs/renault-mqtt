@@ -61,6 +61,7 @@ value-template keys / command suffixes.
 | `RETIRED_SENSORS` | `[object_id, …]` | Ids a previous version shipped; their retained discovery config is cleared on startup. |
 | `RETIRED_BINARY_SENSORS` / `RETIRED_BUTTONS` / `RETIRED_NUMBERS` | `[object_id, …]` | *Optional*, default `()`. The same, for that domain. An id may not be both retired and live in one domain; `configure()` raises. |
 | `DEFAULT_DISABLED_SENSORS` | `{object_id, …}` | Published but disabled in the entity registry by default. |
+| `DATA_GATED_SENSORS` | `{object_id, …}` | *Optional*, default `()`. Sensors whose availability follows whether the poll published their key, so a stalled endpoint shows *unavailable* rather than an empty value. |
 | `ACTION_BUTTONS` | `{object_id: (name, icon, endpoint)}` | Control buttons; published only when `endpoint` is supported. |
 | `BUTTON_CMD_OVERRIDES` | `{object_id: cmd_suffix}` | *Optional*, default `{}`. Remap a button's command suffix when it differs from `object_id.removeprefix(OBJ_PREFIX)` (see §6). |
 | `NUMBERS` | `{object_id: (name, icon, min, max, step)}` | Writable sliders; published only when `SOC_ENDPOINT` is supported. |
@@ -88,10 +89,11 @@ Everything else is imported from the core and **wired at startup**:
 ```python
 import catalog
 from renault_mqtt import config, mqtt
-from renault_mqtt.charge import CHARGES_ENDPOINT, resolve_last_charge, update_charge_session
+from renault_mqtt.charge import CHARGES_ENDPOINT, _epoch, resolve_last_charge, update_charge_session
 from renault_mqtt.config import _RedactingFilter, cfg, redact
 from renault_mqtt.debug import maybe_dump_api
-from renault_mqtt.parse import _bool_on, _charge_schedule_fields, _dist, _enum_label, _find_precond, _hvac_schedule_fields
+from renault_mqtt.parse import (_bool_on, _charge_schedule_fields, _dist, _enum_label, _find_precond,
+                                _hvac_schedule_fields, available_energy, location_attrs)
 from renault_mqtt.util import _num, iso, now_ts
 from catalog import ENV_PREFIX  # + your tables/constants
 
@@ -118,10 +120,6 @@ Read the MQTT topics as attributes (`mqtt.STATE_TOPIC`, `mqtt.AVAIL_TOPIC`, `mqt
 `mqtt.TRACKER_STATE_TOPIC`) and the location policy as `mqtt.PUBLISH_LOCATION` — `configure()` derives
 them at runtime, so don't `from mqtt import STATE_TOPIC` at module load. `resolve_account` sets the
 auto-discovered id via `config._DISCOVERED_ACCOUNT_ID = …` so redaction can mask it.
-
-**Optional per-model debug probes.** If the car exposes an endpoint the shared dump doesn't cover
-(the R5's raw `alerts` GET), set `debug.EXTRA_SPECIALS = fn` where `fn(vehicle, start, end)` returns an
-iterable of `(name, present, call)` tuples. Default `None` = no extras.
 
 ## 4. Dockerfile — install the core
 
@@ -163,9 +161,9 @@ keys `poll_once` / the core produce match the object_ids your catalog declares).
 ## 6. If the model must preserve existing entity names
 
 Some models are ports of an existing dashboard "view" whose users' cards query specific `entity_id`s
-(this is the R5's situation — see the a290 `r5-entity-name-compat` note). Because HA builds
+(this is the R5's situation). Because HA builds
 `entity_id = slug(DEVICE.name + " " + friendly_name)` and ignores `object_id`, entity ids are preserved
-as long as your `DEVICE.name` + friendly names match the original. Two escape hatches keep the *topics*
+as long as your `DEVICE.name` + friendly names match the original. One escape hatch keeps the *topics*
 right without renaming anything:
 
 - **`BUTTON_CMD_OVERRIDES`** — when a button's command name differs from its entity-id short form

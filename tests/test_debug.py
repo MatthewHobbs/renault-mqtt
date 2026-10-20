@@ -3,9 +3,8 @@
 here is the structural key/value scrubber for decoded API payloads — its job is to never leak
 identifiers/secrets into the WARNING dump.
 
-Model-agnostic: a TEST_ prefix is injected (as each add-on injects its own), and the per-model
-EXTRA_SPECIALS probe hook is exercised directly. `_DEBUG_STATE` / `EXTRA_SPECIALS` are restored
-around every test.
+Model-agnostic: a TEST_ prefix is injected (as each add-on injects its own). `_DEBUG_STATE` is
+restored around every test.
 """
 import asyncio
 import logging
@@ -19,7 +18,6 @@ from renault_mqtt import config, debug, mqtt
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     monkeypatch.setattr(config, "ENV_PREFIX", "TEST_")
-    monkeypatch.setattr(debug, "EXTRA_SPECIALS", None)
     saved = dict(debug._DEBUG_STATE)
     yield
     debug._DEBUG_STATE.clear()
@@ -216,25 +214,6 @@ def test_dump_api_probes_ranged_endpoints(monkeypatch):
     start, end = captured["window"]                  # charges probed with a ~30-day window
     assert (end - start).days == debug._DEBUG_RANGE_DAYS
 
-
-def test_dump_api_runs_registered_extra_specials(monkeypatch):
-    """A per-model EXTRA_SPECIALS hook (e.g. the R5's raw `alerts` GET) is probed alongside the
-    shared date-ranged endpoints, gated on its own capability check."""
-    monkeypatch.setenv("TEST_VIN", "SECRET")
-    probed = []
-
-    async def _capture(out, name, call, secrets):
-        probed.append(name)
-
-    async def _alerts():
-        return {"alertLevel": "info"}
-
-    monkeypatch.setattr(debug, "_dump_one", _capture)
-    monkeypatch.setattr(debug, "EXTRA_SPECIALS",
-                        lambda vehicle, start, end: [("alerts", object(), _alerts),
-                                                     ("skipme", None, _alerts)])   # None -> skipped
-    asyncio.run(debug.dump_api(_DumpVehicle()))
-    assert "alerts" in probed and "skipme" not in probed
 
 
 def test_dump_api_records_per_endpoint_errors():

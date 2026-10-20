@@ -9,9 +9,8 @@ cycle. `_debug_redact` here is the *structural* key/value scrubber for decoded A
 distinct from config.redact, the substring scrubber for arbitrary log strings; the dump uses both
 (config's secret list feeds this module's value masking).
 
-Per-model variation: the `debug_dump` option name is read under config.ENV_PREFIX, and an add-on
-may register extra per-model probes via EXTRA_SPECIALS (e.g. the Renault 5's raw `alerts` GET,
-which the A290 does not expose). The no-arg method list and the redaction key-set are shared.
+Per-model variation: only the `debug_dump` option name, read under config.ENV_PREFIX. The
+endpoint list and the redaction key-set are shared.
 """
 import json
 import logging
@@ -62,13 +61,6 @@ _DEBUG_REDACT_KEYS = {
     "secret", "password", "gigyacookievalue",
 }
 _DEBUG_STATE = {"dumped": False}
-
-# Optional per-model probe hook. An add-on may set this to a callable
-# `(vehicle, start, end) -> iterable of (name, present, call)` to add extra endpoints to the dump
-# beyond the shared date-ranged ones (get_charges / get_charge_history) — e.g. the R5's raw
-# `alerts` GET. `present` is the truthy capability check (falsy -> skipped); `call` is an
-# awaitable factory. Left None here; the A290 registers nothing.
-EXTRA_SPECIALS = None
 
 
 def debug_enabled():
@@ -131,8 +123,7 @@ async def dump_api(vehicle):
         fn = getattr(vehicle, meth, None)
         if fn is not None:
             await _dump_one(out, meth, lambda _f=fn: _f(), secrets)
-    # Date-ranged endpoints can't be called arg-less; probe the last N days. Any per-model extras
-    # (EXTRA_SPECIALS) are appended and gated on their own capability check the same way.
+    # Date-ranged endpoints can't be called arg-less; probe the last N days.
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=_DEBUG_RANGE_DAYS)
     specials = [
@@ -141,8 +132,6 @@ async def dump_api(vehicle):
         ("get_charge_history", getattr(vehicle, "get_charge_history", None),
          lambda: vehicle.get_charge_history(start, end, "month")),
     ]
-    if EXTRA_SPECIALS is not None:
-        specials += list(EXTRA_SPECIALS(vehicle, start, end))
     for name, present, call in specials:
         if present:
             await _dump_one(out, name, call, secrets)
