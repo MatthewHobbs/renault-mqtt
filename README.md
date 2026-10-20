@@ -18,9 +18,11 @@ Each add-on's Docker image installs this package from a pinned, immutable git re
 source of truth for the third-party dependency tree:
 
 ```dockerfile
-# after the hash-locked requirements.txt install
-RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
-    "renault-mqtt @ git+https://github.com/MatthewHobbs/renault-mqtt@<immutable-sha>"
+# after the hash-locked requirements.txt install; setuptools from apk, so nothing unpinned from PyPI
+RUN apk add --no-cache --virtual .core-build git py3-setuptools \
+ && pip3 install --no-cache-dir --break-system-packages --no-build-isolation --no-deps \
+      "renault-mqtt @ git+https://github.com/MatthewHobbs/renault-mqtt@<immutable-sha>" \
+ && apk del .core-build
 ```
 
 The ref is pinned by **immutable commit SHA** (a tag is kept alongside for readability), the same
@@ -28,29 +30,27 @@ reproducibility discipline the add-ons already use for the bundled `tempio` rebu
 deliberately when a core change should ship; the add-on's own container-verify + CI gate confirms
 the new core renders and boots clean.
 
-## Extraction status
+## Modules
 
-The modules move over incrementally — one small PR per seam, tests green throughout — mirroring
-the `main.py` split that preceded this (a290 #55). Order runs safest-leaf-first:
+| Module   | Holds |
+|----------|-------|
+| `util`   | Pure primitives (`now_ts` / `iso` / `_num`). |
+| `config` | `cfg` / `_opt_flag` and the secret-redaction net; env prefix injected via `ENV_PREFIX`. |
+| `charge` | Charge-session reconciliation and `CHARGES_ENDPOINT`. |
+| `debug`  | The one-shot debug dump and its payload redaction. |
+| `mqtt`   | Discovery and the broker client; identity and tables injected via `configure(catalog)`. |
+| `parse`  | Shared value-format and payload-parse helpers. |
 
-| Module    | Status  | Notes                                                             |
-|-----------|---------|-------------------------------------------------------------------|
-| `util`    | **here**| Pure primitives (`now_ts` / `iso` / `_num`). The walking skeleton.|
-| `config`  | **here**| `cfg` / `_opt_flag` / redaction net; env prefix injected via `ENV_PREFIX`.|
-| `charge`  | **here**| Charge-session reconciliation + `CHARGES_ENDPOINT`. No per-model knob.|
-| `debug`   | **here**| Debug-dump + redaction; per-model probes via `EXTRA_SPECIALS`.       |
-| `mqtt`    | **here**| Discovery + client; identity/tables injected via `configure(catalog)`.|
-| `main`    | partial | Shared parse/format helpers extracted (`parse`); poll_once + controls stay per-model.|
-
-Per-model variation stays out of here: `catalog.py`, device/node identifiers, endpoint quirks and
-default capacity live in each add-on.
+Per-model variation stays out of here: `catalog.py`, `poll_once`, controls, device/node
+identifiers, endpoint quirks and default capacity live in each add-on. To add a model, see
+[docs/adding-a-model.md](docs/adding-a-model.md).
 
 ## Development
 
 ```sh
-pip install -e .
-ruff check renault_mqtt
-python3 -m pytest tests -q --cov=renault_mqtt --cov-report=term-missing --cov-fail-under=100
+pip install -e . -r requirements-dev.txt
+just ci        # ruff + pytest at 100 % coverage, the same commands CI runs
+just e2e 2026.9.3   # optional: the Home Assistant harness in Docker, see tests/e2e/README.md
 ```
 
 MIT licensed.

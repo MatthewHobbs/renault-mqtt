@@ -35,7 +35,7 @@ jobs:
       - name: Install
         run: |
           python3 -m pip install --quiet -e .
-          python3 -m pip install --quiet pytest pytest-cov
+          python3 -m pip install --quiet -r requirements-dev.txt
 
       - name: pytest
         # The core is pure, catalog-parameterised code — hold it to 100 % line coverage.

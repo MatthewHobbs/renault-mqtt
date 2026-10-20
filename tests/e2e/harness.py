@@ -119,7 +119,6 @@ class Run(gate.Gate):
         self.notes.append(f"MQTT flow: {flow['trail']}")
         self.t_mqtt_added = time.monotonic()
         self.ha.wait_mqtt_loaded()
-        self.t_mqtt_loaded_first = time.monotonic()
         if getattr(self, "watcher", None) is not None:
             # HA holds the birth until discovery has been quiet for 5 s (client.py
             # _discovery_cooldown), so publishing scenarios straight away would defer it past
@@ -359,7 +358,7 @@ class Run(gate.Gate):
             live.stop()
         if not ok:
             raise RuntimeError(f"(d2) never registered: {[u for u in old.values() if u not in snap]}")
-        self.d2_old, self.d2_before = old, snap
+        self.d2_before = snap
 
     def scenario_d2(self):
         log("(d2) reboot: broker restarted with persistence, the core connects before HA starts")
@@ -553,7 +552,7 @@ class Run(gate.Gate):
         self.broker.replay(resend)
         ok_c, snap = self.ha.wait_registry(absent=[ctl_uid], timeout=SETTLE)
         t_c = round(time.monotonic() - t3, 1)
-        ok3, snap = self.ha.wait_registry(absent=list(d3.uids.values()), timeout=D3_WATCH)
+        _, snap = self.ha.wait_registry(absent=list(d3.uids.values()), timeout=D3_WATCH)
         logs3 = stack.ha_logs(s3)
         self.row("d3/control", "sensor", "REMOVED" if ctl_uid not in snap else "NOT-REMOVED",
                  {"entity_id": d3.before[ctl_uid]["entity_id"], "registry_id": d3.before[ctl_uid]["id"],
@@ -609,7 +608,7 @@ class Run(gate.Gate):
         if leftover:
             entry_id = d3.before[d3.uids["sensor"]]["config_entry_id"]
             self.ha.remove_device_from_entry(d3.device_id, entry_id)
-            ok_m, snap_m = self.ha.wait_registry(absent=leftover, timeout=SETTLE)
+            ok_m, _ = self.ha.wait_registry(absent=leftover, timeout=SETTLE)
             dev_after = self.ha.device_by_identifier(f"{cr.SYNTH_NODE}_d3")
             self.row("d3/manual-device", "all", "REMOVED" if ok_m else "NOT-REMOVED",
                      {"device_id": d3.device_id, "orphans": {u: d3.before[u]["entity_id"] for u in leftover},
@@ -892,7 +891,7 @@ def main():
     result = {"ha_version_requested": args.ha_version, "ha_version_running": getattr(run, "ha_version", None),
               "image": stack.image_digest(args.ha_version), "core": core.path, "core_version": core.version,
               "capabilities": run.caps, "notes": run.notes, "rows": run.rows,
-              "order": {k: getattr(run, k) for k in ("d1_order", "d3_order", "d4i_order", "d4w_order", "d4m_order",
+              "order": {k: getattr(run, k) for k in ("d1_order", "d3_order", "d4i_order", "d4w_order", "d4m_order", "d4u_order",
                                                      "e_order_control", "e_order_one-pass",
                                                      "e_order_two-pass") if hasattr(run, k)}}
     if args.out:

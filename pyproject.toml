@@ -10,7 +10,7 @@ license = { text = "MIT" }
 authors = [{ name = "MatthewHobbs", email = "matt@matthobbs.net" }]
 requires-python = ">=3.14"
 dynamic = ["version"]
-# Runtime deps are declared as the modules that need them move in — pinned to match the add-ons.
+# Pinned to match the add-ons.
 # The consuming add-ons install this package with `--no-deps`, so their own hash-pinned
 # requirements.txt stays the single source of truth for the shipped image; these pins only make
 # standalone `pip install renault-mqtt` (and this repo's own CI) resolve correctly.
