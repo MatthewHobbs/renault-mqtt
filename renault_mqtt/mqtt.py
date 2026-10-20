@@ -175,6 +175,10 @@ def _on_message(client, userdata, msg):
             # A retained command would re-run (horn, climate) on every restart or reconnect.
             LOG.warning("Ignoring retained command %r: clear it with an empty retained publish", cmd)
             return
+        if not msg.payload:
+            # That empty clear reaches live subscribers unretained. HA always sends a payload
+            # (PRESS, a number), so an empty one is never a real command.
+            return
         payload = msg.payload.decode(errors="replace") if msg.payload else ""
         LOG.info("Received command: %r %r", cmd, payload)   # %r: a newline cannot forge a log line
         asyncio.run_coroutine_threadsafe(_COMMAND_HANDLER(cmd, payload), _LOOP)
@@ -201,6 +205,11 @@ def _on_disconnect(client, userdata, flags, reason_code, properties=None):
         LOG.warning("MQTT disconnected (%s) — reconnecting", reason_code)
 
 
+def _on_connect_fail(client, userdata):
+    # Without this a wrong host or a broker that never comes up retries silently forever.
+    LOG.warning("MQTT broker %s:%s unreachable — retrying", cfg("MQTT_HOST"), cfg("MQTT_PORT", "1883"))
+
+
 def mqtt_connect():
     client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION2, client_id=_CLIENT_ID)
     if cfg("MQTT_USER"):
@@ -209,6 +218,7 @@ def mqtt_connect():
     client.on_message = _on_message
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_connect_fail = _on_connect_fail
     client.reconnect_delay_set(min_delay=1, max_delay=120)   # bounded backoff on broker drop
     LOG.info("Connecting to MQTT %s:%s", cfg("MQTT_HOST"), cfg("MQTT_PORT", "1883"))
     # connect_async: a broker that is not up yet is retried by loop_start's thread on the backoff

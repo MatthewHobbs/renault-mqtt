@@ -439,6 +439,7 @@ def test_mqtt_connect_wires_client_with_keepalive_and_auth(monkeypatch):
     assert fake.calls["connect"] == ("broker", 1884, 45)     # keepalive from the fake catalog
     assert fake.calls["will"][0] == "test_node/availability"
     assert fake.calls["loop_start"] is True
+    assert client.on_connect_fail is mqtt._on_connect_fail
 
 
 def test_mqtt_connect_without_auth(monkeypatch):
@@ -473,6 +474,24 @@ def test_on_message_drops_retained_command(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         mqtt._on_message(None, None, msg)
     assert calls == [] and "Ignoring retained command 'horn'" in caplog.text
+
+
+def test_on_message_ignores_empty_payload_clear(monkeypatch):
+    # Clearing a retained command publishes an empty retained message, which the broker delivers
+    # live with retain unset; it must not fire the command.
+    calls = []
+    monkeypatch.setattr(mqtt, "_LOOP", object())
+    monkeypatch.setattr(mqtt, "_COMMAND_HANDLER", lambda c, p: None)
+    monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe", lambda *a: calls.append(a))
+    mqtt._on_message(None, None, types.SimpleNamespace(topic="test_node/cmd/horn", payload=b"", retain=False))
+    assert calls == []
+
+
+def test_on_connect_fail_warns(monkeypatch, caplog):
+    monkeypatch.setenv("MQTT_HOST", "nowhere.invalid")
+    with caplog.at_level("WARNING"):
+        mqtt._on_connect_fail(None, None)
+    assert "nowhere.invalid" in caplog.text and "unreachable" in caplog.text
 
 
 def test_on_message_logs_payload_without_forging_lines(monkeypatch, caplog):
