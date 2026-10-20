@@ -171,8 +171,16 @@ def _on_message(client, userdata, msg):
         return
     if _LOOP is not None and _COMMAND_HANDLER is not None and msg.topic.startswith(CMD_PREFIX):
         cmd = msg.topic[len(CMD_PREFIX):]
+        if msg.retain:
+            # A retained command would re-run (horn, climate) on every restart or reconnect.
+            LOG.warning("Ignoring retained command %r: clear it with an empty retained publish", cmd)
+            return
+        if not msg.payload:
+            # That empty clear reaches live subscribers unretained. HA always sends a payload
+            # (PRESS, a number), so an empty one is never a real command.
+            return
         payload = msg.payload.decode(errors="replace") if msg.payload else ""
-        LOG.info("Received command: %s %s", cmd, payload)
+        LOG.info("Received command: %r %r", cmd, payload)   # %r: a newline cannot forge a log line
         asyncio.run_coroutine_threadsafe(_COMMAND_HANDLER(cmd, payload), _LOOP)
 
 
@@ -197,6 +205,11 @@ def _on_disconnect(client, userdata, flags, reason_code, properties=None):
         LOG.warning("MQTT disconnected (%s) — reconnecting", reason_code)
 
 
+def _on_connect_fail(client, userdata):
+    # Without this a wrong host or a broker that never comes up retries silently forever.
+    LOG.warning("MQTT broker %s:%s unreachable — retrying", cfg("MQTT_HOST"), cfg("MQTT_PORT", "1883"))
+
+
 def mqtt_connect():
     client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION2, client_id=_CLIENT_ID)
     if cfg("MQTT_USER"):
@@ -205,9 +218,12 @@ def mqtt_connect():
     client.on_message = _on_message
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_connect_fail = _on_connect_fail
     client.reconnect_delay_set(min_delay=1, max_delay=120)   # bounded backoff on broker drop
     LOG.info("Connecting to MQTT %s:%s", cfg("MQTT_HOST"), cfg("MQTT_PORT", "1883"))
-    client.connect(cfg("MQTT_HOST"), int(cfg("MQTT_PORT", "1883") or "1883"), keepalive=_KEEPALIVE)
+    # connect_async: a broker that is not up yet is retried by loop_start's thread on the backoff
+    # above, instead of connect() raising and killing the add-on at boot.
+    client.connect_async(cfg("MQTT_HOST"), int(cfg("MQTT_PORT", "1883") or "1883"), keepalive=_KEEPALIVE)
     client.loop_start()
     return client
 
@@ -357,9 +373,9 @@ def publish_discovery(client, supported_eps, dist_unit):
         cmd = cmd_overrides.get(obj, short)
         topic = f"{DISCOVERY_PREFIX}/button/{NODE}/{_topic_segment('button', obj, prefix)}/config"
         # The refresh-location button is withheld unless the user opted in AND location publishing
-        # is on. The else-branch below publishes a zero-length retained payload, which is what makes
-        # Home Assistant delete an entity an existing install already has — so an upgrade removes
-        # the button rather than leaving a dead one behind.
+        # is on. The else-branch tombstones it, which is what makes Home Assistant delete an entity
+        # an existing install already has — so an upgrade removes the button rather than leaving a
+        # dead one behind.
         refresh_ok = PUBLISH_LOCATION and ENABLE_REFRESH_LOCATION
         if ep in supported_eps and not (ep == cat.REFRESH_LOCATION_EP and not refresh_ok):
             conf = {"name": name, "object_id": obj, "unique_id": obj,

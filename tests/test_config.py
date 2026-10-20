@@ -6,6 +6,7 @@ Written model-agnostically: a test ENV_PREFIX is injected (as each add-on inject
 prefix and the discovered-account global after every test.
 """
 import logging
+import sys
 
 import pytest
 
@@ -99,3 +100,24 @@ def test_redacting_filter_scrubs_log_records(monkeypatch):
     msg = rec.getMessage()
     assert "VF1FILTERVIN" not in msg and "acct-flt" not in msg
     assert msg.count("***") == 2 and rec.args == ()
+
+
+def test_redacting_filter_scrubs_tracebacks(monkeypatch):
+    monkeypatch.setenv("TEST_VIN", "VF1TRACEVIN")
+    try:
+        raise RuntimeError("GET /vehicles/VF1TRACEVIN/battery failed")
+    except RuntimeError:
+        rec = logging.LogRecord("x", logging.ERROR, __file__, 1, "poll failed", (), sys.exc_info())
+    rec.stack_info = "stack at VF1TRACEVIN"
+    assert config._RedactingFilter().filter(rec) is True
+    text = logging.Formatter().format(rec)
+    assert "VF1TRACEVIN" not in text and "RuntimeError" in text
+    assert rec.exc_info is None and rec.stack_info is None
+
+
+def test_redacting_filter_scrubs_preformatted_exc_text(monkeypatch):
+    monkeypatch.setenv("TEST_VIN", "VF1TEXTVIN")
+    rec = logging.LogRecord("x", logging.ERROR, __file__, 1, "poll failed", (), None)
+    rec.exc_text = "Traceback: VF1TEXTVIN"
+    config._RedactingFilter().filter(rec)
+    assert "VF1TEXTVIN" not in logging.Formatter().format(rec) and "***" in rec.msg

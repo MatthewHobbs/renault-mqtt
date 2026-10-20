@@ -245,6 +245,20 @@ def test_dump_api_records_per_endpoint_errors():
     asyncio.run(debug.dump_api(V()))   # exercises the per-method except branch
 
 
+def test_dump_one_redacts_error_strings():
+    async def call():
+        raise RuntimeError("GET /vehicles/VF1ERRVIN/x")
+
+    out = {}
+    asyncio.run(debug._dump_one(out, "get_x", call, ["VF1ERRVIN"]))
+    assert out["get_x"]["_error"] == "RuntimeError: GET /vehicles/***/x"
+
+
+def test_debug_redact_masks_short_location_and_plate_keys():
+    out = debug._debug_redact({"lat": 51.5, "lon": -0.1, "licensePlate": "AB12CDE", "soc": 80}, [])
+    assert out == {"lat": "***", "lon": "***", "licensePlate": "***", "soc": 80}
+
+
 def test_maybe_dump_api_runs_once_per_restart(monkeypatch):
     debug._DEBUG_STATE["dumped"] = False
     monkeypatch.setenv("TEST_DEBUG_DUMP", "true")

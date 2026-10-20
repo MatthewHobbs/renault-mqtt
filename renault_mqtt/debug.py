@@ -49,7 +49,8 @@ _DEBUG_REDACT_KEYS = {
     "registrationnumber", "vin", "tcucode", "radiocode", "siret", "msisdn", "phonenumber",
     "phone", "mobile", "email", "firstname", "lastname", "gigyaid", "personid", "accountid",
     "iccid", "imei", "contractid", "address", "postcode", "zipcode", "city", "country",
-    "gpslatitude", "gpslongitude", "latitude", "longitude",
+    "gpslatitude", "gpslongitude", "latitude", "longitude", "lat", "lon", "lng",
+    "licenseplate", "plate", "nickname",
     # Vehicle-lifecycle / privacy / build-spec — quasi-identifying or owner-private. The
     # `assets` block carries 3dv.renault.com render URLs that embed the build-spec (VCD)
     # code in the path; mask the whole subtree (it has no sensor-mapping diagnostic value).
@@ -110,7 +111,7 @@ async def _dump_one(out, name, call, secrets):
             raw = getattr(res, "raw_data", None) or {"_repr": str(res)}
         out[name] = _debug_redact(raw, secrets)
     except Exception as err:  # noqa: BLE001
-        out[name] = {"_error": f"{type(err).__name__}: {err}"}
+        out[name] = {"_error": _debug_redact(f"{type(err).__name__}: {err}", secrets)}
 
 
 async def dump_api(vehicle):
