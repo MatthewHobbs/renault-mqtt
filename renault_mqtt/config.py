@@ -78,6 +78,16 @@ class _RedactingFilter(logging.Filter):
     error/snapshot paths; idempotent, so double-redaction is harmless."""
 
     def filter(self, record):
-        record.msg = redact(record.getMessage())
+        msg = record.getMessage()
+        # A traceback is rendered by the handler after this filter, so fold it into the message
+        # here; otherwise an exception carrying the request URL would log the VIN unmasked.
+        if record.exc_info:
+            msg += "\n" + logging.Formatter().formatException(record.exc_info)
+        elif record.exc_text:
+            msg += "\n" + record.exc_text
+        if record.stack_info:
+            msg += "\n" + record.stack_info
+        record.msg = redact(msg)
         record.args = ()
+        record.exc_info = record.exc_text = record.stack_info = None
         return True

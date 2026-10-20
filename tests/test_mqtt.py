@@ -408,7 +408,7 @@ class _FakePaho:
     def reconnect_delay_set(self, min_delay, max_delay):
         self.calls["backoff"] = (min_delay, max_delay)
 
-    def connect(self, host, port, keepalive):
+    def connect_async(self, host, port, keepalive):
         self.calls["connect"] = (host, port, keepalive)
 
     def loop_start(self):
@@ -459,16 +459,42 @@ def test_on_message_dispatches_command(monkeypatch):
     monkeypatch.setattr(mqtt, "_COMMAND_HANDLER", handler)
     monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe",
                         lambda coro, loop: scheduled.update(cmd=coro) or coro.close())
-    msg = types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"go")
+    msg = types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"go", retain=False)
     mqtt._on_message(None, None, msg)
     assert "cmd" in scheduled
+
+
+def test_on_message_drops_retained_command(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(mqtt, "_LOOP", object())
+    monkeypatch.setattr(mqtt, "_COMMAND_HANDLER", lambda c, p: None)
+    monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe", lambda *a: calls.append(a))
+    msg = types.SimpleNamespace(topic="test_node/cmd/horn", payload=b"x", retain=True)
+    with caplog.at_level("WARNING"):
+        mqtt._on_message(None, None, msg)
+    assert calls == [] and "Ignoring retained command 'horn'" in caplog.text
+
+
+def test_on_message_logs_payload_without_forging_lines(monkeypatch, caplog):
+    monkeypatch.setattr(mqtt, "_LOOP", object())
+
+    async def handler(cmd, payload):
+        return None
+
+    monkeypatch.setattr(mqtt, "_COMMAND_HANDLER", handler)
+    monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe", lambda coro, loop: coro.close())
+    msg = types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"x\nFAKE", retain=False)
+    with caplog.at_level("INFO"):
+        mqtt._on_message(None, None, msg)
+    assert "\nFAKE" not in caplog.text and "'x\\nFAKE'" in caplog.text
 
 
 def test_on_message_ignores_non_command_and_unwired(monkeypatch):
     calls = []
     monkeypatch.setattr(mqtt.asyncio, "run_coroutine_threadsafe", lambda *a: calls.append(a))
     # not wired -> ignored
-    mqtt._on_message(None, None, types.SimpleNamespace(topic="test_node/cmd/wake", payload=b""))
+    mqtt._on_message(None, None, types.SimpleNamespace(topic="test_node/cmd/wake", payload=b"",
+                                                       retain=False))
     # wired but wrong topic -> ignored
     monkeypatch.setattr(mqtt, "_LOOP", object())
     monkeypatch.setattr(mqtt, "_COMMAND_HANDLER", lambda c, p: None)
