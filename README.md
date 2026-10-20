@@ -53,4 +53,6 @@ just ci        # ruff + pytest at 100 % coverage, the same commands CI runs
 just e2e 2026.9.3   # optional: the Home Assistant harness in Docker, see tests/e2e/README.md
 ```
 
+Releases and tag signing: [docs/releasing.md](docs/releasing.md).
+
 MIT licensed.
