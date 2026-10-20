@@ -18,9 +18,11 @@ Each add-on's Docker image installs this package from a pinned, immutable git re
 source of truth for the third-party dependency tree:
 
 ```dockerfile
-# after the hash-locked requirements.txt install
-RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
-    "renault-mqtt @ git+https://github.com/MatthewHobbs/renault-mqtt@<immutable-sha>"
+# after the hash-locked requirements.txt install; setuptools from apk, so nothing unpinned from PyPI
+RUN apk add --no-cache --virtual .core-build git py3-setuptools \
+ && pip3 install --no-cache-dir --break-system-packages --no-build-isolation --no-deps \
+      "renault-mqtt @ git+https://github.com/MatthewHobbs/renault-mqtt@<immutable-sha>" \
+ && apk del .core-build
 ```
 
 The ref is pinned by **immutable commit SHA** (a tag is kept alongside for readability), the same

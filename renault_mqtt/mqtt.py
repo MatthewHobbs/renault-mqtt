@@ -179,7 +179,7 @@ def _on_message(client, userdata, msg):
             # That empty clear reaches live subscribers unretained. HA always sends a payload
             # (PRESS, a number), so an empty one is never a real command.
             return
-        payload = msg.payload.decode(errors="replace") if msg.payload else ""
+        payload = msg.payload.decode(errors="replace")
         LOG.info("Received command: %r %r", cmd, payload)   # %r: a newline cannot forge a log line
         asyncio.run_coroutine_threadsafe(_COMMAND_HANDLER(cmd, payload), _LOOP)
 

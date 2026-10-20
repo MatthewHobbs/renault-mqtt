@@ -93,7 +93,8 @@ from renault_mqtt.charge import CHARGES_ENDPOINT, _epoch, resolve_last_charge, u
 from renault_mqtt.config import _RedactingFilter, cfg, redact
 from renault_mqtt.debug import maybe_dump_api
 from renault_mqtt.parse import (_bool_on, _charge_schedule_fields, _dist, _enum_label, _find_precond,
-                                _hvac_schedule_fields, available_energy, location_attrs)
+                                _hvac_schedule_fields, available_energy)
+from renault_mqtt.parse import location_attrs as build_location_attrs
 from renault_mqtt.util import _num, iso, now_ts
 from catalog import ENV_PREFIX  # + your tables/constants
 

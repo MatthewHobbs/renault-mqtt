@@ -891,7 +891,7 @@ def main():
     result = {"ha_version_requested": args.ha_version, "ha_version_running": getattr(run, "ha_version", None),
               "image": stack.image_digest(args.ha_version), "core": core.path, "core_version": core.version,
               "capabilities": run.caps, "notes": run.notes, "rows": run.rows,
-              "order": {k: getattr(run, k) for k in ("d1_order", "d3_order", "d4i_order", "d4w_order", "d4m_order",
+              "order": {k: getattr(run, k) for k in ("d1_order", "d3_order", "d4i_order", "d4w_order", "d4m_order", "d4u_order",
                                                      "e_order_control", "e_order_one-pass",
                                                      "e_order_two-pass") if hasattr(run, k)}}
     if args.out:
