@@ -6,7 +6,11 @@ one), and config.ENV_PREFIX is armed. The discovery-template/data-key contract â
 that ships broken dashboard tiles â€” is pinned here against that fake catalog; each add-on also
 keeps a contract test against its real catalog.
 """
+import asyncio
 import json
+import socket
+import threading
+import time
 import types
 
 import pytest
@@ -795,3 +799,431 @@ def test_new_retired_lists_are_optional():
     assert cleared == ["homeassistant/button/test_node/forbidden/config",
                        "homeassistant/button/test_node/refresh/config",
                        "homeassistant/sensor/test_node/tst_old/config"]
+
+
+class SnapshotBroker(StubClient, _FakePaho):
+    """QoS 0 broker: disconnected publications really are lost, not queued."""
+
+    def __init__(self):
+        StubClient.__init__(self)
+        _FakePaho.__init__(self)
+        self.connected = False
+        self.failure = None
+        self.failure_topic = None
+        self.delivered = asyncio.Event()
+
+    def is_connected(self):
+        return self.connected
+
+    def publish(self, topic, payload, retain=False):
+        if self.failure and (self.failure_topic is None or self.failure_topic == topic):
+            failure, self.failure = self.failure, None
+            if isinstance(failure, Exception):
+                raise failure
+            return types.SimpleNamespace(rc=failure)
+        rc = 0 if self.connected else mqtt.paho_mqtt.MQTT_ERR_NO_CONN
+        if rc == 0:
+            StubClient.publish(self, topic, payload, retain)
+            self.delivered.set()
+        return types.SimpleNamespace(rc=rc, wait_for_publish=lambda timeout: None,
+                                     is_published=lambda: True)
+
+    def connack(self, reason=0):
+        self.connected = reason == 0
+        self.on_connect(self, None, None, reason)
+
+    def disconnect(self):
+        self.connected = False
+        self.calls["disconnect"] = True
+        self.on_disconnect(self, None, None, 0)
+
+    def loop_stop(self):
+        self.calls["stop"] = True
+
+    def socket(self):
+        return None
+
+
+def _snapshot_client(monkeypatch):
+    broker = SnapshotBroker()
+    monkeypatch.setattr(mqtt.paho_mqtt, "Client", lambda *a, **k: broker)
+    mqtt._MQTT_CTX.update(supported=_ALL_EPS, dist_unit="km")
+    assert mqtt.mqtt_connect(snapshots=True) is broker
+    return broker
+
+
+async def _turn():
+    # Drain call_soon_threadsafe notifications; no wall-clock connection sleeps.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+def test_snapshot_delayed_connack_without_another_poll(monkeypatch):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        data = {"battery": 42}
+        c.snapshots.update(data, location={"latitude": 1, "longitude": 2})
+        data["battery"] = 99  # snapshot owns its serialized values
+        await _turn()
+        assert c.log == []  # broker unavailable: update returns, event loop keeps running
+        c.connack(5)
+        await _turn()
+        assert c.log == []
+        # Exercise the actual network-thread -> asyncio-loop boundary.
+        thread = threading.Thread(target=c.connack)
+        thread.start()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        await _turn()
+        assert json.loads(c.pub[mqtt.STATE_TOPIC]) == {"battery": 42}
+        assert json.loads(c.pub[mqtt.ATTR_TOPIC]) == {"latitude": 1, "longitude": 2}
+        assert c.index_of(mqtt.TRACKER_STATE_TOPIC, "") < c.index_of(mqtt.STATE_TOPIC, c.pub[mqtt.STATE_TOPIC])
+        assert c.writes("homeassistant/sensor/test_node/tst_old/config")[-1] == ("", True)
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_reconnect_coalesces_and_clears_location_and_birth_replays(monkeypatch):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        await _turn()
+        c.snapshots.update({"battery": 1}, location={"latitude": 1})
+        await _turn()
+        c.connected = False
+        c.on_disconnect(c, None, None, 1)
+        for value in range(2, 100):
+            c.snapshots.update({"battery": value})
+        c.snapshots.update({"battery": 100}, location=None)
+        await _turn()
+        c.log.clear()
+        c.connack()
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC) == [(json.dumps({"battery": 100}), True)]
+        assert c.writes(mqtt.ATTR_TOPIC) == [("", True)]
+        c.log.clear()
+        c.on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"online"))
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC) == [(json.dumps({"battery": 100}), True)]
+        await c.snapshots.close()
+        assert c.writes(mqtt.AVAIL_TOPIC)[-1] == ("offline", True)
+        assert c.calls["disconnect"] and c.calls["stop"]
+        c.snapshots.update({"battery": 999})
+        c.connack()
+        await _turn()
+        assert c.writes(mqtt.AVAIL_TOPIC)[-1] == ("offline", True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [mqtt.paho_mqtt.MQTT_ERR_NO_CONN, ValueError("publish failed")])
+def test_snapshot_publish_failure_retries_without_poll(monkeypatch, failure):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        await _turn()
+        c.delivered.clear()
+        c.failure = failure
+        monkeypatch.setattr(c.snapshots, "RETRY_SECONDS", 0.001)
+        c.snapshots.update({"battery": 77})
+        await asyncio.wait_for(c.delivered.wait(), timeout=1)
+        assert json.loads(c.pub[mqtt.STATE_TOPIC]) == {"battery": 77}
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_clients_are_isolated_and_privacy_optout_never_caches_gps(monkeypatch):
+    async def run():
+        a = _snapshot_client(monkeypatch)
+        monkeypatch.setattr(mqtt, "PUBLISH_LOCATION", False)
+        b = _snapshot_client(monkeypatch)
+        a.snapshots.update({"battery": 1}, location={"latitude": 1})
+        b.snapshots.update({"battery": 2}, location={"latitude": 2})
+        b.connack()
+        await _turn()
+        assert mqtt.STATE_TOPIC not in a.pub
+        assert json.loads(b.pub[mqtt.STATE_TOPIC]) == {"battery": 2}
+        assert all(not p or "latitude" not in p for p, _ in b.writes(mqtt.ATTR_TOPIC))
+        await a.snapshots.close()  # disconnected shutdown also terminates cleanly
+        await b.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_queued_replay_uses_newest_state_and_preserves_last_fix(monkeypatch):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.snapshots.update({"battery": 1}, location={"latitude": 1})
+        c.connack()  # notification is queued, not yet processed on the event loop
+        c.snapshots.update({"battery": 2})
+        with pytest.raises(TypeError):
+            c.snapshots.update({"battery": 3}, location=object())
+        await _turn()
+        assert {p for p, _ in c.writes(mqtt.STATE_TOPIC)} == {json.dumps({"battery": 2})}
+        assert json.loads(c.pub[mqtt.ATTR_TOPIC]) == {"latitude": 1}
+        c.log.clear()
+        c.failure = mqtt.paho_mqtt.MQTT_ERR_NO_CONN
+        c.snapshots.update({"battery": 3})
+        await _turn()  # failed delivery has scheduled a retry
+        c.snapshots.update({"battery": 4})
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC) == [(json.dumps({"battery": 4}), True)]
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [mqtt.paho_mqtt.MQTT_ERR_NO_CONN, ValueError("private payload")])
+def test_snapshot_shutdown_cancels_pending_delivery_even_if_offline_publish_fails(monkeypatch, failure, caplog):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        await _turn()
+        c.snapshots.update({"battery": 1})  # queued but not yet written
+        c.failure = failure
+        await c.snapshots.close()
+        c.on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"online"))
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC) == []
+        assert c.calls["disconnect"] and c.calls["stop"]
+        assert "private payload" not in caplog.text
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("topic", ["test_node/location/attributes", "test_node/availability"])
+def test_snapshot_partial_delivery_retries_the_complete_latest_snapshot(monkeypatch, topic):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        await _turn()
+        c.failure, c.failure_topic = mqtt.paho_mqtt.MQTT_ERR_NO_CONN, topic
+        c.snapshots.update({"battery": 1}, location={"latitude": 1})
+        await _turn()
+        # Supersede a partially delivered snapshot before its retry fires.
+        c.snapshots.update({"battery": 2}, location=None)
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC)[-1] == (json.dumps({"battery": 2}), True)
+        assert c.writes(mqtt.ATTR_TOPIC)[-1] == ("", True)
+        assert c.log[-1] == (mqtt.AVAIL_TOPIC, "online", True)
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_poll_during_network_thread_discovery_waits_for_ordered_replay(monkeypatch):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        c.snapshots.update({"battery": 1}, location={"latitude": 1})
+        await _turn()
+        c.log.clear()
+        entered, release = threading.Event(), threading.Event()
+        publish = c.publish
+
+        def paused_publish(topic, payload, retain=False):
+            if topic == mqtt.TRACKER_STATE_TOPIC and payload == mqtt.TRACKER_PAYLOAD_RESET:
+                entered.set()
+                assert release.wait(timeout=2)
+            return publish(topic, payload, retain=retain)
+
+        monkeypatch.setattr(c, "publish", paused_publish)
+        thread = threading.Thread(target=c.on_message, args=(c, None, types.SimpleNamespace(
+            topic="homeassistant/status", payload=b"online")))
+        thread.start()
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            c.snapshots.update({"battery": 2}, location=None)
+            await _turn()
+            assert c.writes(mqtt.STATE_TOPIC) == []
+        finally:
+            release.set()
+            await asyncio.to_thread(thread.join, 2)
+        await _turn()
+        assert c.writes(mqtt.STATE_TOPIC) == [(json.dumps({"battery": 2}), True)]
+        assert c.index_of(mqtt.TRACKER_STATE_TOPIC, "") < c.index_of(mqtt.STATE_TOPIC, c.pub[mqtt.STATE_TOPIC])
+        assert c.writes(mqtt.ATTR_TOPIC) == [("", True)]
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_flush_already_started_can_interleave_birth_then_replays(monkeypatch):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        await _turn()
+        c.log.clear()
+        flushing, discovering, release = threading.Event(), threading.Event(), threading.Event()
+        publish = c.publish
+
+        def paused_publish(topic, payload, retain=False):
+            if topic == mqtt.STATE_TOPIC and not flushing.is_set():
+                flushing.set()
+                assert discovering.wait(2)
+            result = publish(topic, payload, retain=retain)
+            if topic == mqtt.TRACKER_STATE_TOPIC and payload == mqtt.TRACKER_PAYLOAD_RESET:
+                discovering.set()
+                assert release.wait(2)
+            return result
+
+        monkeypatch.setattr(c, "publish", paused_publish)
+
+        def birth():
+            assert flushing.wait(2)
+            c.on_message(c, None, types.SimpleNamespace(topic="homeassistant/status", payload=b"online"))
+
+        thread = threading.Thread(target=birth)
+        thread.start()
+        try:
+            c.snapshots.update({"battery": 1}, location={"latitude": 1})
+            await _turn()
+            assert not c.snapshots._ready.is_set()
+            # Discovery has begun, but the already-started flush completes between
+            # its reset and tombstone. This is permitted; a full replay must follow.
+            assert c.log[-3:] == [(mqtt.STATE_TOPIC, json.dumps({"battery": 1}), True),
+                                 (mqtt.ATTR_TOPIC, json.dumps({"latitude": 1}), True),
+                                 (mqtt.AVAIL_TOPIC, "online", True)]
+            c.snapshots.update({"battery": 2}, location=None)
+            await _turn()
+            assert len(c.writes(mqtt.STATE_TOPIC)) == 1
+        finally:
+            release.set()
+            await asyncio.to_thread(thread.join, 2)
+        assert not thread.is_alive()
+        await _turn()
+        assert c.log[-3:] == [(mqtt.STATE_TOPIC, json.dumps({"battery": 2}), True),
+                             (mqtt.ATTR_TOPIC, "", True), (mqtt.AVAIL_TOPIC, "online", True)]
+        assert c.index_of(mqtt.TRACKER_STATE_TOPIC, "") < len(c.log) - 3
+        await c.snapshots.close()
+    asyncio.run(run())
+
+
+def test_snapshot_offline_timeout_is_logged_without_payload(monkeypatch, caplog):
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.connack()
+        monkeypatch.setattr(c, "publish", lambda *a, **k: types.SimpleNamespace(
+            rc=0, wait_for_publish=lambda timeout: None, is_published=lambda: False))
+
+        def already_closed(how):
+            raise OSError("private payload")
+
+        monkeypatch.setattr(c, "socket", lambda: types.SimpleNamespace(shutdown=already_closed))
+        await c.snapshots.close()
+        assert "MQTT offline delivery timed out" in caplog.text
+        assert "private payload" not in caplog.text
+        assert c.calls["stop"]
+    asyncio.run(run())
+
+
+def test_snapshot_cleanup_deadline_does_not_hold_asyncio_executor_shutdown(monkeypatch, caplog):
+    release, stopped = threading.Event(), threading.Event()
+    workers = []
+
+    def blocked_stop():
+        workers.append(threading.current_thread())
+        release.wait()
+        stopped.set()
+
+    async def run():
+        c = _snapshot_client(monkeypatch)
+        c.snapshots.SHUTDOWN_TIMEOUT = 0.05
+        monkeypatch.setattr(c, "loop_stop", blocked_stop)
+        await c.snapshots.close()
+
+    try:
+        started = time.monotonic()
+        asyncio.run(run())  # includes default-executor shutdown, with join still blocked
+        assert time.monotonic() - started < 0.5
+        assert workers[0].daemon and workers[0].is_alive()
+        assert not stopped.is_set()
+        assert "daemon cleanup still pending" in caplog.text
+    finally:
+        release.set()
+        assert stopped.wait(1)
+
+
+@pytest.mark.parametrize("mode", ["no_connack", "pending_writes", "tls_handshake"])
+def test_snapshot_real_paho_shutdown_with_stalled_peer(monkeypatch, caplog, mode):
+    """Real TCP sockets and Paho loop_stop, including its pending-packet drain.
+
+    The peer never reads after CONNECT (or any TLS bytes), and never closes to
+    rescue shutdown. Only public Paho APIs are used, including to observe writes.
+    """
+    async def run():
+        accepted, release = asyncio.Event(), asyncio.Event()
+        handlers = []
+
+        async def peer(reader, writer):
+            handlers.append(asyncio.current_task())
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            try:
+                if mode != "tls_handshake":
+                    assert await reader.readexactly(1) == b"\x10"
+                    remaining, multiplier = 0, 1
+                    while True:
+                        digit = (await reader.readexactly(1))[0]
+                        remaining += (digit & 127) * multiplier
+                        multiplier *= 128
+                        if digit < 128:
+                            break
+                    await reader.readexactly(remaining)
+                    if mode == "pending_writes":
+                        writer.write(b"\x20\x02\x00\x00")
+                        await writer.drain()
+                accepted.set()
+                await release.wait()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(peer, "127.0.0.1", 0)
+        c = mqtt.paho_mqtt.Client(mqtt.paho_mqtt.CallbackAPIVersion.VERSION2)
+        c.snapshots = mqtt.SnapshotPublisher(c)
+        stopped = threading.Event()
+        stop = c.loop_stop
+
+        def real_stop():
+            stop()
+            stopped.set()
+
+        monkeypatch.setattr(c, "loop_stop", real_stop)
+        if mode == "tls_handshake":
+            c.tls_set()
+            # Exercise the bounded fallback while real TLS connection setup is
+            # blocked, before Paho exposes its socket. Not an executor job.
+            c.snapshots.SHUTDOWN_TIMEOUT = 0.1
+        # Paho 2.1 uses keepalive, not connect_timeout, for the TLS handshake.
+        c.connect_async("127.0.0.1", server.sockets[0].getsockname()[1],
+                        keepalive=1 if mode == "tls_handshake" else 60)
+        c.loop_start()
+        try:
+            await asyncio.wait_for(accepted.wait(), 2)
+            if mode == "pending_writes":
+                async with asyncio.timeout(2):
+                    while not c.is_connected():
+                        await asyncio.sleep(0.01)
+                c.socket().setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                info = c.publish(mqtt.STATE_TOPIC, "x" * (16 * 1024 * 1024), retain=True)
+                await asyncio.sleep(0.1)
+                assert c.want_write() and not info.is_published()
+            else:
+                assert not c.is_connected()
+                assert (c.socket() is None) == (mode == "tls_handshake")
+            started = time.monotonic()
+            await c.snapshots.close()
+            elapsed = time.monotonic() - started
+            assert elapsed < c.snapshots.SHUTDOWN_TIMEOUT + 0.5
+            if mode == "tls_handshake":
+                assert "daemon cleanup still pending" in caplog.text
+            else:
+                assert stopped.is_set()  # real join finished before peer release
+                assert "daemon cleanup still pending" not in caplog.text
+            if mode == "pending_writes":
+                assert elapsed >= c.snapshots.OFFLINE_TIMEOUT
+                assert "MQTT offline delivery timed out" in caplog.text
+                assert not info.is_published()  # aborted, not secretly drained
+            async with asyncio.timeout(2):
+                while not stopped.is_set():
+                    await asyncio.sleep(0.01)
+        finally:
+            release.set()
+            server.close()
+            await server.wait_closed()
+            await asyncio.gather(*handlers)
+    asyncio.run(run())

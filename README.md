@@ -45,6 +45,53 @@ Per-model variation stays out of here: `catalog.py`, `poll_once`, controls, devi
 identifiers, endpoint quirks and default capacity live in each add-on. To add a model, see
 [docs/adding-a-model.md](docs/adding-a-model.md).
 
+### Retained poll snapshots
+
+Inside the add-on's running asyncio loop, opt in to latest-snapshot delivery:
+
+```python
+client = mqtt.mqtt_connect(snapshots=True)
+# After a poll (pass dictionaries, not pre-serialized JSON):
+client.snapshots.update(data, location=location_attrs)
+# Poll failure or no new location fix: preserve the last location.
+client.snapshots.update(data)
+# Explicit privacy clear: remove retained location attributes.
+client.snapshots.update(data, location=None)
+# At shutdown, before closing the asyncio loop:
+await client.snapshots.close()
+```
+
+Use this in place of direct state, location and online publishes. Only pass
+`location=location_attrs` when a new fix is available; an omitted location keeps the
+last fix, whereas `None` clears it. `PUBLISH_LOCATION=false` never caches coordinates
+and always clears retained attributes. Configuration remains once per process.
+
+Updates must run on the creating event loop. They serialize a complete snapshot
+immediately and return without waiting for a broker. The per-client cache holds only
+the latest state and location, and survives delayed CONNACK and reconnect without
+another poll. Network callbacks schedule replay after the existing ordered discovery
+pass (including HA birth); snapshot writes run on the asyncio loop, so queued replay
+cannot overwrite a newer poll with captured older data. Publish errors retry after one
+second, using the latest snapshot. Messages remain retained QoS 0; this provides
+reconnect recovery, not broker acknowledgements or persistence across process restarts.
+An already in-flight snapshot may precede or interleave HA-birth discovery: clearing
+readiness cannot retract QoS 0 writes already started. A complete latest-snapshot
+replay follows discovery; the multi-topic snapshot is not an atomic transaction.
+Discovery and command messages are not buffered.
+
+Shutdown disables replay, gives offline availability up to two seconds to flush,
+then disconnects, shuts down the current socket through Paho's public `socket()`
+accessor, and joins the MQTT thread. This aborts pending writes if a broker stops
+reading; offline delivery is best effort (QoS 0 completion is not broker receipt).
+`close()` waits up to three seconds for a dedicated daemon cleanup thread, outside
+the asyncio executor. If cleanup exceeds that budget, it logs a warning and returns;
+cleanup and Paho's daemon may remain until the blocking operation returns or the
+process exits. In particular, Paho has no public cancellation API for DNS resolution
+or connection establishment (its default connect timeout is five seconds per socket
+attempt, excluding DNS). This is a bounded wait, not a guarantee of thread termination
+within three seconds. Existing `mqtt_connect()` callers retain raw-publish behavior
+until ported.
+
 ## Development
 
 ```sh
