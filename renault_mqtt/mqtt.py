@@ -24,6 +24,8 @@ import asyncio
 import json
 import logging
 import re
+import socket
+import threading
 
 import paho.mqtt.client as paho_mqtt
 
@@ -158,16 +160,141 @@ def configure(catalog):
 
 
 _HA_BIRTH_TOPIC = "homeassistant/status"
+_UNCHANGED = object()
+
+
+class SnapshotPublisher:
+    """Latest retained poll result, owned by the asyncio loop that creates it.
+
+    Opt in with mqtt_connect(snapshots=True), then use client.snapshots.update().
+    Never buffers discovery, commands or a history of polls. Network callbacks only
+    signal readiness; all snapshot writes and retries run on the owning event loop.
+    """
+
+    RETRY_SECONDS = 1
+    OFFLINE_TIMEOUT = 2
+    SHUTDOWN_TIMEOUT = 3
+
+    def __init__(self, client):
+        self._loop = asyncio.get_running_loop()
+        self._client = client
+        self._state_topic, self._attr_topic, self._avail_topic = STATE_TOPIC, ATTR_TOPIC, AVAIL_TOPIC
+        self._location_enabled = PUBLISH_LOCATION
+        self._state = None
+        self._location = None if PUBLISH_LOCATION else ""
+        self._ready = threading.Event()
+        self._closed = False
+        self._pending = None
+
+    def update(self, state, *, location=_UNCHANGED):
+        """Replace the complete state on the owning loop, without waiting for MQTT.
+
+        Omit location to keep the last fix (e.g. a poll failure/no new fix); pass
+        None to clear retained coordinates. Location opt-out never caches GPS.
+        Serialization happens before replacing either value, so caller mutation or
+        a serialization failure cannot leave a mixed snapshot.
+        """
+        if self._closed:
+            return
+        state = json.dumps(state)
+        attrs = self._location
+        if not self._location_enabled:
+            attrs = ""
+        elif location is not _UNCHANGED:
+            attrs = "" if location is None else json.dumps(location)
+        self._state, self._location = state, attrs
+        self._schedule()
+
+    def _schedule(self):
+        if not self._closed:
+            if self._pending is not None:
+                self._pending.cancel()
+            self._pending = self._loop.call_soon(self._flush)
+
+    def _resume(self):
+        # Called AFTER the ordered discovery pass on paho's network thread.
+        if not self._closed:
+            self._ready.set()
+            self._loop.call_soon_threadsafe(self._schedule)
+
+    def _flush(self):
+        self._pending = None
+        if self._closed or not self._ready.is_set() or not self._client.is_connected():
+            return
+        messages = [(self._state_topic, self._state), (self._attr_topic, self._location),
+                    (self._avail_topic, "online")]
+        try:
+            for topic, payload in messages:
+                if payload is not None:
+                    info = self._client.publish(topic, payload, retain=True)
+                    if info.rc != paho_mqtt.MQTT_ERR_SUCCESS:
+                        raise RuntimeError(f"MQTT publish returned {info.rc}")
+        except Exception as err:  # paho may raise as well as return an error code
+            # No payload or exception text: poll results can contain private data.
+            LOG.warning("MQTT snapshot delivery failed (%s) — retrying", type(err).__name__)
+            self._pending = self._loop.call_later(self.RETRY_SECONDS, self._flush)
+
+    async def close(self):
+        """Stop replay and allow up to three seconds for best-effort cleanup.
+
+        Call on the owning loop before closing it. A dedicated daemon (not an
+        executor job) owns cleanup: a stuck DNS/connect cannot delay loop shutdown.
+        Paho has no public timed join or way to cancel an in-progress resolver.
+        """
+        self._closed = True
+        self._ready.clear()
+        if self._pending is not None:
+            self._pending.cancel()
+        self._state = self._location = None
+        worker = threading.Thread(target=self._stop, name="mqtt-shutdown", daemon=True)
+        worker.start()
+        deadline = self._loop.time() + self.SHUTDOWN_TIMEOUT
+        while worker.is_alive():
+            if self._loop.time() >= deadline:
+                LOG.warning("MQTT shutdown timed out — daemon cleanup still pending")
+                return
+            await asyncio.sleep(0.01)
+
+    def _stop(self):
+        try:
+            if self._client.is_connected():
+                info = self._client.publish(self._avail_topic, "offline", retain=True)
+                if info.rc != paho_mqtt.MQTT_ERR_SUCCESS:
+                    raise RuntimeError(f"MQTT publish returned {info.rc}")
+                info.wait_for_publish(timeout=self.OFFLINE_TIMEOUT)
+                if not info.is_published():
+                    LOG.warning("MQTT offline delivery timed out")
+        except Exception as err:
+            LOG.warning("MQTT offline delivery failed (%s)", type(err).__name__)
+        finally:
+            self._client.disconnect()
+            # DISCONNECT queues behind pending QoS 0 packets. loop_stop alone
+            # can drain forever when the peer stops reading. Abort that transport
+            # through public APIs, after giving offline its best-effort flush.
+            sock = self._client.socket()
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:  # paho may have already closed it concurrently
+                    pass
+            self._client.loop_stop()
 
 
 def _on_message(client, userdata, msg):
+    snapshots = getattr(client, "snapshots", None)
+    if snapshots is not None and snapshots._closed:
+        return
     if msg.topic == _HA_BIRTH_TOPIC:
         # HA's documented discovery trigger (its MQTT docs tell publishers to use this), separate
         # from the add-on's own reconnect below: HA sends this on every broker reconnect too, not
         # only at its own start, and it is not retained, so a subscriber that joins late needs the
         # add-on's own re-publish-on-connect for that case instead.
         if msg.payload == b"online" and _MQTT_CTX["supported"] is not None:
+            if snapshots is not None:
+                snapshots._ready.clear()
             publish_discovery(client, _MQTT_CTX["supported"], _MQTT_CTX["dist_unit"])
+            if snapshots is not None:
+                snapshots._resume()
         return
     if _LOOP is not None and _COMMAND_HANDLER is not None and msg.topic.startswith(CMD_PREFIX):
         cmd = msg.topic[len(CMD_PREFIX):]
@@ -185,6 +312,11 @@ def _on_message(client, userdata, msg):
 
 
 def _on_connect(client, userdata, flags, reason_code, properties=None):
+    snapshots = getattr(client, "snapshots", None)
+    if snapshots is not None:
+        snapshots._ready.clear()
+        if snapshots._closed:
+            return
     # Guard on a successful CONNACK: on a refused connect (rc != 0) the client isn't connected, so
     # don't claim "online" or attempt (no-op) subscribes/republishes — paho will retry via the
     # bounded backoff, and this runs again on the eventual success. Runs on the initial connect AND
@@ -196,11 +328,17 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(_HA_BIRTH_TOPIC)
     if _MQTT_CTX["supported"] is not None:
         publish_discovery(client, _MQTT_CTX["supported"], _MQTT_CTX["dist_unit"])
-    client.publish(AVAIL_TOPIC, "online", retain=True)
+    if snapshots is None:
+        client.publish(AVAIL_TOPIC, "online", retain=True)
+    else:
+        snapshots._resume()
     LOG.info("MQTT connected — subscribed to commands, discovery (re)published")
 
 
 def _on_disconnect(client, userdata, flags, reason_code, properties=None):
+    snapshots = getattr(client, "snapshots", None)
+    if snapshots is not None:
+        snapshots._ready.clear()
     if reason_code != 0:
         LOG.warning("MQTT disconnected (%s) — reconnecting", reason_code)
 
@@ -210,8 +348,15 @@ def _on_connect_fail(client, userdata):
     LOG.warning("MQTT broker %s:%s unreachable — retrying", cfg("MQTT_HOST"), cfg("MQTT_PORT", "1883"))
 
 
-def mqtt_connect():
+def mqtt_connect(*, snapshots=False):
+    """Start nonblocking MQTT connection; optionally own latest-poll delivery.
+
+    snapshots=True requires a running asyncio loop and exposes client.snapshots.
+    Existing raw-publish clients retain their original behavior.
+    """
     client = paho_mqtt.Client(paho_mqtt.CallbackAPIVersion.VERSION2, client_id=_CLIENT_ID)
+    if snapshots:
+        client.snapshots = SnapshotPublisher(client)
     if cfg("MQTT_USER"):
         client.username_pw_set(cfg("MQTT_USER"), cfg("MQTT_PASS"))
     client.will_set(AVAIL_TOPIC, "offline", retain=True)
