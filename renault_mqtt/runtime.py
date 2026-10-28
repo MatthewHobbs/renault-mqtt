@@ -11,6 +11,7 @@ from renault_mqtt.freshness import freshness_fields
 from renault_mqtt.util import iso, now_ts
 
 HEALTH_PORT = 8099
+HEALTH_GRACE = 60
 MILES_LOCALES = frozenset({"en_gb"})
 _AUTH_KEYWORDS = ("login", "password", "credential", "401", "403")
 
@@ -75,12 +76,20 @@ async def panel_state(latest, *, web_mod=None):
 
 async def start_health_server(
     *, panel_file, latest, log, port=HEALTH_PORT, panel_page_fn=None, panel_state_fn=None, web_mod=None,
+    health_state=None, now_monotonic=time.monotonic,
 ):
-    """Start /healthz and the read-only ingress status panel (GET / and GET /api/state)."""
+    """Start /healthz and the read-only ingress status panel (GET / and GET /api/state).
+
+    `health_state` carries the poll loop's expected-progress deadline (monotonic seconds).
+    A deadline that has passed answers 503; while it is None (startup) /healthz answers 200.
+    """
     if web_mod is None:
         from aiohttp import web as web_mod
 
     async def _healthz(_req):
+        deadline = (health_state or {}).get("deadline")
+        if deadline is not None and now_monotonic() >= deadline:
+            return web_mod.Response(text="stalled", status=503)
         return web_mod.Response(text="ok")
 
     async def _page(_req):
@@ -167,13 +176,20 @@ async def run_main(
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
 
-    health = await start_health_server()
+    poll_budget = max(30, interval - 10)
+    health_state = {"deadline": None}
+    health = await start_health_server(health_state=health_state)
     state = load_state()
     last_data = {}
     latest.update(ok=False, last_poll=None, data={})
     vsession = vsession_factory(locale)
     unresolved = set(support_endpoints)
-    supported = await detect_supported(vsession, unresolved=unresolved)
+    supported = set()
+    try:
+        supported = await wait_for(detect_supported(vsession, unresolved=unresolved),
+                                   timeout=poll_budget)
+    except asyncio.TimeoutError:
+        log.warning("Endpoint detection timed out; polling without discovery until it succeeds")
     mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = supported, dist_unit
     latest["supported"] = sorted(supported)
     latest["dist_unit"] = dist_unit
@@ -187,6 +203,7 @@ async def run_main(
 
     fails = 0
     max_backoff = max(interval, 1800)
+    health_state["deadline"] = monotonic() + poll_budget + HEALTH_GRACE
     while not stop.is_set():
         try:
             t0 = monotonic()
@@ -243,6 +260,9 @@ async def run_main(
             latest.update(ok=False, last_poll=iso(now()), error=redact(err), data=data)
             save_state(state)
         wait = interval if fails == 0 else min(interval * 2 ** (fails - 1), max_backoff)
+        # The loop is alive if an iteration completed, success or failure; the deadline covers
+        # the sleep and the next poll, so only a loop that stops completing reports stalled.
+        health_state["deadline"] = monotonic() + wait + poll_budget + HEALTH_GRACE
         try:
             await wait_for(stop.wait(), timeout=wait)
         except asyncio.TimeoutError:

@@ -9,6 +9,7 @@ import pytest
 
 from renault_mqtt import config, freshness, mqtt
 from renault_mqtt.runtime import (
+    HEALTH_GRACE,
     HEALTH_PORT,
     MILES_LOCALES,
     is_auth_failure,
@@ -136,8 +137,8 @@ def test_resolve_account_raises_when_no_match_and_no_myrenault(monkeypatch):
 # --------------------------------------------------------------------------- #
 def _make_fake_web():
     class Response:
-        def __init__(self, *, text="", content_type="text/plain"):
-            self.status = 200
+        def __init__(self, *, text="", content_type="text/plain", status=200):
+            self.status = status
             self.text = text
             self.content_type = content_type
 
@@ -233,6 +234,46 @@ def test_health_server_serves_healthz_panel_and_state(monkeypatch, tmp_path):
         finally:
             await runner.cleanup()
         assert runner.cleaned_up is True
+
+    asyncio.run(scenario())
+
+
+def test_healthz_answers_503_once_the_expected_progress_deadline_passes(monkeypatch):
+    fake_web = _make_fake_web()
+    fake_aiohttp = types.ModuleType("aiohttp")
+    fake_aiohttp.web = fake_web
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+    monkeypatch.setitem(sys.modules, "aiohttp.web", fake_web)
+    state = {"deadline": 100.0}
+    clock = {"t": 99.999}
+
+    async def _call_route(handler):
+        res = handler(None)
+        return await res if asyncio.iscoroutine(res) else res
+
+    async def scenario():
+        runner = await start_health_server(
+            panel_file="unused.html", latest={}, log=LOG, port=0,
+            health_state=state, now_monotonic=lambda: clock["t"],
+        )
+        routes = runner.app.router.routes
+        try:
+            before = await _call_route(routes["/healthz"])
+            assert before.status == 200 and before.text == "ok"
+            clock["t"] = 100.0
+            stalled = await _call_route(routes["/healthz"])
+            assert stalled.status == 503 and stalled.text == "stalled"
+            # Progress resumes: the loop moves the deadline and the answer recovers.
+            state["deadline"] = 160.0
+            resumed = await _call_route(routes["/healthz"])
+            assert resumed.status == 200 and resumed.text == "ok"
+            # Startup (no deadline yet) is never reported as stalled.
+            state["deadline"] = None
+            clock["t"] = 10_000.0
+            startup = await _call_route(routes["/healthz"])
+            assert startup.status == 200 and startup.text == "ok"
+        finally:
+            await runner.cleanup()
 
     asyncio.run(scenario())
 
@@ -348,7 +389,7 @@ def test_run_main_exits_on_missing_required_config(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         asyncio.run(run_main(
             addon_name="Test", version="1.0", setup_logging=lambda: None,
-            run_command=lambda *a: None, start_health_server=lambda: asyncio.sleep(0),
+            run_command=lambda *a: None, start_health_server=lambda **kw: asyncio.sleep(0),
             load_state=dict, save_state=lambda s: None, latest={},
             vsession_factory=_FakeVS, support_endpoints={"ep"},
             detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0, set()),
@@ -369,10 +410,12 @@ def test_run_main_success_cycle_support_retry_and_shutdown(
     clock = {"t": 1767225600.0, "m": 10.0}
     monkeypatch.setattr(freshness, "now_ts", lambda: clock["t"])
     order, saved_states, deploy_calls, vs_list = [], [], [], []
+    captured = {}
     latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": [],
               "dist_unit": "km", "data": {"stale": 1}}
 
-    async def start_health():
+    async def start_health(health_state=None):
+        captured["health_state"] = health_state
         order.append("health")
         return types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0, order.append("health_cleanup")))
 
@@ -441,6 +484,9 @@ def test_run_main_success_cycle_support_retry_and_shutdown(
     assert deploy_calls == [{"refresh_location": False}]
     assert discoveries == [({"pressure", "soc-levels"}, expect_unit)]
     assert latest["ok"] is True
+    # interval 60 in the harness: wait + poll budget + grace from the iteration's own clock.
+    assert captured["health_state"]["deadline"] == (
+        clock["m"] + 60 + max(30, 60 - 10) + HEALTH_GRACE)
     assert latest["dist_unit"] == expect_unit
     assert latest["supported"] == ["pressure", "soc-levels"]
     assert latest["data"]["data_stale"] == "off"
@@ -453,6 +499,61 @@ def test_run_main_success_cycle_support_retry_and_shutdown(
         assert any("Published in 1.5s: 80% battery, plug=Connected" in m for m in messages)
     else:
         assert any("Published: 80% battery, plug=Connected" in m for m in messages)
+
+
+def test_run_main_bounds_startup_detection_and_keeps_polling(monkeypatch, caplog):
+    _wire_harness(monkeypatch)
+    latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": []}
+    order, timeouts = [], []
+    calls = {"n": 0}
+
+    async def detect(vs, supported=None, unresolved=None):
+        order.append("detect")
+        return {"pressure"}
+
+    async def poll(vs, state, cap, sup, du):
+        order.append("poll")
+        return ({"battery_level": 50}, None)
+
+    async def wait_for(coro, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            timeouts.append(timeout)
+            coro.close()
+            raise asyncio.TimeoutError
+        return await coro
+
+    class OneCycleStop:
+        def __init__(self):
+            self.checks = 0
+
+        def is_set(self):
+            self.checks += 1
+            return self.checks > 1
+
+        def set(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    with caplog.at_level(logging.WARNING, logger=LOG.name):
+        asyncio.run(run_main(
+            addon_name="Test Car", version="1.0", setup_logging=lambda: None,
+            run_command="handler", start_health_server=lambda **kw: asyncio.sleep(
+                0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+            load_state=dict, save_state=lambda s: None, latest=latest,
+            vsession_factory=_FakeVS, support_endpoints={"pressure"},
+            detect_supported=detect, run_deploy=lambda **kw: asyncio.sleep(0),
+            poll_once=poll, api_timeout_total=60, log=LOG, wait_for=wait_for,
+            event_factory=OneCycleStop,
+        ))
+
+    assert timeouts == [max(30, 60 - 10)]
+    # The first poll still runs; the unresolved retry then asks for support again.
+    assert order == ["poll", "detect"]
+    assert latest["ok"] is True and latest["supported"] == []
+    assert any("Endpoint detection timed out" in r.getMessage() for r in caplog.records)
 
 
 def test_run_main_support_retry_failure_is_logged_and_non_fatal(monkeypatch, caplog):
@@ -486,7 +587,7 @@ def test_run_main_support_retry_failure_is_logged_and_non_fatal(monkeypatch, cap
     with caplog.at_level(logging.WARNING, logger=LOG.name):
         asyncio.run(run_main(
             addon_name="Test", version="1.0", setup_logging=lambda: None,
-            run_command="h", start_health_server=lambda: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+            run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
             load_state=dict, save_state=lambda s: None, latest=latest,
             vsession_factory=_FakeVS, support_endpoints={"pressure", "soc-levels"},
             detect_supported=detect, run_deploy=lambda **kw: asyncio.sleep(0),
@@ -546,7 +647,7 @@ def test_run_main_failure_backoff_relogin_cadence_and_redaction(monkeypatch):
 
     asyncio.run(run_main(
         addon_name="Test", version="1.0", setup_logging=lambda: None,
-        run_command="h", start_health_server=lambda: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+        run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
         load_state=dict, save_state=lambda s: saved.append(dict(s)), latest=latest,
         vsession_factory=make_vs, support_endpoints=set(),
         detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0, set()),
@@ -582,7 +683,7 @@ def test_run_main_signal_during_startup_skips_poll_loop_When_early_signals_enabl
 
     asyncio.run(run_main(
         addon_name="Test", version="1.0", setup_logging=lambda: None,
-        run_command="h", start_health_server=lambda: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+        run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
         load_state=dict, save_state=lambda s: None, latest=latest,
         vsession_factory=_FakeVS, support_endpoints=set(),
         detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0, set()),
