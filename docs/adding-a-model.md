@@ -30,7 +30,8 @@ Copy the layout of an existing add-on (start from whichever is closest to your c
   tests/                      pytest (conftest + model-specific tests)
 ```
 
-The shared modules (`util`, `config`, `charge`, `debug`, `mqtt`, `parse`) do **not** live in the
+The shared modules (`util`, `config`, `charge`, `debug`, `mqtt`, `parse`, `freshness`,
+`session`, `support`, `plug`, `hvac`, `commands`, `poll`, `runtime`) do **not** live in the
 add-on — they come from this package.
 
 ## 2. Write `catalog.py` — the per-model contract
@@ -78,11 +79,42 @@ are, so the lists cannot retire ids published under a different prefix: never ch
 
 ## 3. Wire `main.py`
 
-`main.py` keeps the genuinely per-model logic: `poll_once` (mapping the car's API payloads to the
-sensor keys your catalog declares), `run_command` / `COMMAND_ACTIONS`, the control handlers, the
+`main.py` keeps the genuinely per-model adapters and configuration: `poll_once` (delegating to `renault_mqtt.poll.poll_vehicle`
+with the sensor keys and optional `cabin_temp` your catalog declares), `run_command` / `COMMAND_ACTIONS`, the control handlers, the
 enum-label dicts, `is_charging` / `charging_status_label`, `detect_plug_suspect`, `detect_supported`,
-`resolve_account`, the health server, and `main()`. Adapt these from a sibling add-on — the only real
-work is `poll_once`, because that's where the car's specific fields land.
+`resolve_account`, `start_health_server`, and `main()` (delegating to `renault_mqtt.runtime`). Adapt these from a sibling add-on.
+
+`detect_plug_suspect` is an app adapter over `renault_mqtt.plug.detect_plug_suspect`.
+The app interprets Renault enums into separate `plugged` and `unplugged` flags (neither
+for unknown/error), supplies `now_ts()` explicitly, and owns threshold policy: currently
+600–43200 seconds inclusive, at least 1 km travelled **and** 2 SOC points lost.
+Core owns baseline/reconnect/evidence logic and its pure tests; the app owns persistence
+and real-poll contract tests. Pass raw kilometre mileage before display-unit conversion.
+The caller-owned JSON state retains `plug_prev`, `plug_base_ts`, `plug_base_mileage`
+and `plug_base_soc`. Unknown/error stores the historical `"unplugged"` marker but must
+not be treated as an explicit unplugged report for disconnected-but-charging detection.
+Missing inputs do not create driving evidence; incomplete/falsy baselines are not
+repaired while continuously plugged. Reconnection or an absent timestamp key rebases.
+
+Likewise, apps adapt the shared session lifecycle with their own transport/login,
+adapt incremental support resolution with model endpoints, defaults and logging,
+adapt `renault_mqtt.hvac` (`hvac_due`, `poll_hvac_settings`) with caller-owned breaker
+state (`_BREAKERS`, `_BREAKER_FAILS`, `_BREAKER_SKIPS`), thresholds (`BREAKER_TRIP`,
+`BREAKER_RETRY_EVERY`), `vehicle.get_hvac_settings`, and bounded warning/recovery logs,
+and adapt `renault_mqtt.commands` (`COMMAND_DEBOUNCE_S`, `command_lock_get`,
+`precondition_temp`, `hvac_start_action`, `set_soc_level`, `dispatch_command`) with
+caller-owned debounce/in-flight state (`_last_command`, `_in_flight`), short-lived
+`aiohttp.ClientSession(timeout=API_TIMEOUT)` + `_login_vehicle` acquisition, and
+model-specific `COMMAND_ACTIONS`, `NUMBER_RANGES` and optional `NUMBER_ROLES`.
+`poll_once` delegates to `renault_mqtt.poll.poll_vehicle`, passing model label maps,
+breaker dicts/thresholds, `GPS_PRECISION`, `_LATEST`, `detect_plug_suspect`, `LOG`,
+and optional `keys` / `cabin_temp`.
+`resolve_account`, `start_health_server`, `_panel_page`, `_panel_state`, and `main()`
+delegate to `renault_mqtt.runtime` (`HEALTH_PORT`, `MILES_LOCALES`, `resolve_account`,
+`panel_page`, `panel_state`, `start_health_server`, `is_auth_failure`, `run_main`),
+passing model options prefix, `_LATEST`, `_PANEL_FILE`, `VehicleSession`, `SUPPORT_ENDPOINTS`,
+`detect_supported`, `deploy.run_deploy`, `poll_once`, `API_TIMEOUT.total`, auth exception
+types, and per-model logging/signal/key options.
 
 Everything else is imported from the core and **wired at startup**:
 
@@ -104,17 +136,23 @@ config.ENV_PREFIX = ENV_PREFIX
 mqtt.configure(catalog)
 ```
 
-Then inside `async def main()`, wire the dependency-inversion slots (so the core never imports your
-add-on):
+Then inside `async def main()`, delegate to `renault_mqtt.runtime.run_main` (which wires `mqtt._LOOP`,
+`mqtt._COMMAND_HANDLER`, `mqtt._MQTT_CTX`, `mqtt.mqtt_connect(snapshots=True)`, and incremental
+`mqtt.publish_discovery` so the core never imports your add-on):
 
 ```python
-loop = asyncio.get_running_loop()
-mqtt._LOOP = loop                       # the loop an inbound command is scheduled onto
-mqtt._COMMAND_HANDLER = run_command     # your async command dispatcher
-...
-mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = supported, dist_unit  # before mqtt_connect()
-client = mqtt.mqtt_connect()
-mqtt.publish_discovery(client, supported, dist_unit)
+await run_main(
+    addon_name="Renault Scenic", version=VERSION, setup_logging=setup_logging,
+    run_command=run_command, start_health_server=start_health_server,
+    load_state=load_state, save_state=save_state, latest=_LATEST,
+    vsession_factory=VehicleSession, support_endpoints=SUPPORT_ENDPOINTS,
+    detect_supported=detect_supported, run_deploy=deploy.run_deploy,
+    poll_once=poll_once, api_timeout_total=API_TIMEOUT.total, log=LOG,
+    prefix=ENV_PREFIX, miles_locales=MILES_LOCALES,
+    auth_exceptions=_AUTH_EXCEPTIONS, http_error_type=aiohttp.ClientResponseError,
+    now=now_ts, monotonic=time.monotonic,
+    event_factory=asyncio.Event, wait_for=asyncio.wait_for, cfg_fn=cfg,
+)
 ```
 
 Read the MQTT topics as attributes (`mqtt.STATE_TOPIC`, `mqtt.AVAIL_TOPIC`, `mqtt.ATTR_TOPIC`,
