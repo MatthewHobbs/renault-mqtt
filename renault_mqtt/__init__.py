@@ -6,4 +6,4 @@ primitives live here once, parameterised by the add-on's catalog, instead of bei
 between the sibling repos.
 """
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
