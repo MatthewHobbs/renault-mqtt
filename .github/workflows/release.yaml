@@ -6,8 +6,8 @@
 #
 # Idempotent: every successful CI run on main reaches this workflow, and it no-ops unless
 # __version__ names a tag that does not exist yet. 0.13.0 and 0.13.1 shipped untagged because
-# this was a manual step; the add-ons pin the core by SHA and Renovate now tracks it by tag, so
-# a missed tag silently stops those bumps being offered.
+# this was a manual step; the add-ons pin the core by SHA and move it by hand, taking the tag as
+# the release marker, so a missed tag leaves no release to pin.
 name: Release
 
 on:
@@ -127,8 +127,7 @@ jobs:
           git config user.signingkey "$keyfile"
 
           # Deliberately not a vX.Y.Z name: a non-semver tag cannot be mistaken for a
-          # release by the add-ons' Renovate, which reads this repo with the semver
-          # versioning scheme.
+          # release by anything that reads this repo's tags by semver.
           git tag -s "$TAG" HEAD -m "signing check (dry run, deleted immediately)"
           git push origin "$TAG"
 

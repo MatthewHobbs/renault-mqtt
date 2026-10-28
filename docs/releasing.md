@@ -16,10 +16,10 @@ change; nothing else needs editing.
 validated. It no-ops unless `__version__` names a tag that does not exist yet, so every merge can
 reach it safely.
 
-Do not tag by hand. 0.13.0 and 0.13.1 shipped untagged while this was a manual step, and because
-the add-ons' Renovate reads this repo with the `github-tags` datasource, a missing tag silently
-stops the bump ever being offered downstream. That failure is invisible rather than loud, which
-is exactly why the tagging is automated.
+Do not tag by hand. 0.13.0 and 0.13.1 shipped untagged while this was a manual step. The add-ons
+pin the core by SHA and move it by hand, taking the tag as the release marker, so a missing tag
+leaves no release to pin. That failure is invisible rather than loud, which is exactly why the
+tagging is automated.
 
 ## Tag signing, and the dry run that guards it
 
@@ -44,5 +44,5 @@ gh workflow run release.yaml --ref main
 That signs a throwaway tag, asserts the API reports `verification.verified`, and deletes it from
 an `EXIT` trap so a mid-way failure cannot leave one behind. It cannot publish a release: the tag
 job is gated on `workflow_run.conclusion`, which is null for a manual dispatch. The tag name is
-deliberately non-semver (`signing-check-<run_id>`) so the add-ons' Renovate cannot mistake it for
-a release during the seconds it exists.
+deliberately non-semver (`signing-check-<run_id>`) so nothing reading tags by semver can mistake
+it for a release during the seconds it exists.
