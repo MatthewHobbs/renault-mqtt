@@ -420,9 +420,10 @@ def test_run_main_success_cycle_support_retry_and_shutdown(
         return types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0, order.append("health_cleanup")))
 
     async def detect(vs, supported=None, unresolved=None):
-        if supported is None:
+        if not supported:
             order.append("detect_initial")
-            return {"pressure"}
+            supported.add("pressure")
+            return
         order.append("detect_retry")
         supported.add("soc-levels")
         unresolved.clear()
@@ -486,7 +487,7 @@ def test_run_main_success_cycle_support_retry_and_shutdown(
     assert latest["ok"] is True
     # interval 60 in the harness: wait + poll budget + grace from the iteration's own clock.
     assert captured["health_state"]["deadline"] == (
-        clock["m"] + 60 + max(30, 60 - 10) + HEALTH_GRACE)
+        clock["m"] + 60 + max(30, 60 - 10) + min(60, max(30, 60 - 10)) + HEALTH_GRACE)
     assert latest["dist_unit"] == expect_unit
     assert latest["supported"] == ["pressure", "soc-levels"]
     assert latest["data"]["data_stale"] == "off"
@@ -563,8 +564,9 @@ def test_run_main_support_retry_failure_is_logged_and_non_fatal(monkeypatch, cap
     latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": [], "dist_unit": "km", "data": {}}
 
     async def detect(vs, supported=None, unresolved=None):
-        if supported is None:
-            return {"pressure"}
+        if supported == set():
+            supported.add("pressure")
+            return
         raise RuntimeError("retry failed for SECRETVIN999")
 
     async def poll(vs, state, cap, sup, du):
@@ -692,4 +694,296 @@ def test_run_main_signal_during_startup_skips_poll_loop_When_early_signals_enabl
         api_timeout_total=60, log=LOG, early_signals=True, event_factory=PreSetStop,
     ))
     assert polled == []
+
+
+def test_run_main_keeps_partial_startup_support_after_timeout(monkeypatch):
+    _wire_harness(monkeypatch)
+    latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": []}
+    initial = {"hvac-settings"}
+
+    async def detect(vs, supported=None, unresolved=None):
+        from renault_mqtt.support import resolve_support
+
+        async def probe(ep):
+            if ep == "soc-levels":
+                return True
+            raise RuntimeError("still pending")
+
+        await resolve_support(probe, supported, unresolved, lambda ep, err: None)
+
+    calls = {"n": 0}
+
+    async def wait_for(coro, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await coro
+            raise asyncio.TimeoutError
+        return await coro
+
+    class OneShot:
+        def __init__(self):
+            self.n = 0
+
+        def is_set(self):
+            self.n += 1
+            return self.n > 1
+
+        def set(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    asyncio.run(run_main(
+        addon_name="Test", version="1.0", setup_logging=lambda: None,
+        run_command="h", start_health_server=lambda **kw: asyncio.sleep(
+            0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+        load_state=dict, save_state=lambda s: None, latest=latest,
+        vsession_factory=_FakeVS, support_endpoints={"soc-levels", "hvac-settings"},
+        initial_supported=initial, detect_supported=detect, run_deploy=lambda **kw: asyncio.sleep(0),
+        poll_once=lambda *a: asyncio.sleep(0, ({"battery_level": 50}, None)),
+        api_timeout_total=60, log=LOG, event_factory=OneShot, wait_for=wait_for,
+    ))
+    assert latest["supported"] == ["hvac-settings", "soc-levels"]
+    assert initial == {"hvac-settings"}
+
+
+def test_run_main_preserves_optimistic_defaults_on_startup_probe_errors(monkeypatch):
+    _wire_harness(monkeypatch)
+    latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": []}
+
+    async def detect(vs, supported=None, unresolved=None):
+        from renault_mqtt.support import resolve_support
+
+        async def probe(ep):
+            if ep == "actions/charge-start":
+                return False
+            raise RuntimeError("probe unavailable")
+
+        await resolve_support(probe, supported, unresolved, lambda ep, err: None)
+
+    class OneShot:
+        def __init__(self):
+            self.n = 0
+
+        def is_set(self):
+            self.n += 1
+            return self.n > 1
+
+        def set(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    asyncio.run(run_main(
+        addon_name="Test", version="1.0", setup_logging=lambda: None,
+        run_command="h", start_health_server=lambda **kw: asyncio.sleep(
+            0, types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))),
+        load_state=dict, save_state=lambda s: None, latest=latest,
+        vsession_factory=_FakeVS,
+        support_endpoints={"actions/charge-start", "charge-mode", "pressure"},
+        initial_supported={"actions/charge-start", "charge-mode", "pressure"},
+        detect_supported=detect, run_deploy=lambda **kw: asyncio.sleep(0),
+        poll_once=lambda *a: asyncio.sleep(0, ({"battery_level": 50}, None)),
+        api_timeout_total=60, log=LOG, event_factory=OneShot,
+    ))
+    assert latest["supported"] == ["charge-mode", "pressure"]
+
+
+def test_run_main_health_deadline_covers_poll_and_support_retry(monkeypatch):
+    fc, _ = _wire_harness(monkeypatch, interval="300")
+    latest = {"version": "1.0", "ok": False, "last_poll": None, "supported": []}
+    deadlines = []
+
+    async def start_health(health_state=None):
+        deadlines.append(health_state)
+        return types.SimpleNamespace(cleanup=lambda: asyncio.sleep(0))
+
+    async def detect(vs, supported=None, unresolved=None):
+        if not supported:
+            return
+        unresolved.clear()
+
+    async def poll(vs, state, cap, sup, du):
+        return ({"battery_level": 50}, None)
+
+    class OneShot:
+        def __init__(self):
+            self.n = 0
+
+        def is_set(self):
+            self.n += 1
+            return self.n > 1
+
+        def set(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    asyncio.run(run_main(
+        addon_name="Test", version="1.0", setup_logging=lambda: None,
+        run_command="h", start_health_server=start_health,
+        load_state=dict, save_state=lambda s: None, latest=latest,
+        vsession_factory=_FakeVS, support_endpoints={"pressure"},
+        detect_supported=detect, run_deploy=lambda **kw: asyncio.sleep(0),
+        poll_once=poll, api_timeout_total=120, log=LOG,
+        monotonic=lambda: 0, event_factory=OneShot,
+    ))
+    # 290 s poll + 120 s support retry + grace, then the same budget after sleep.
+    assert deadlines[0]["deadline"] >= 290 + 120 + HEALTH_GRACE + 300
+
+
+@pytest.mark.parametrize("failure", ["cancel", "deploy"])
+def test_run_main_cleans_up_on_cancellation_and_startup_failure(monkeypatch, failure):
+    fc, _ = _wire_harness(monkeypatch)
+    events = []
+
+    async def close_client():
+        await _FakeSnapshotsClient.close(fc)
+        events.append("client")
+
+    fc.close = close_client
+
+    class Resource:
+        def __init__(self, name):
+            self.name = name
+
+        async def close(self):
+            events.append(self.name)
+
+        async def cleanup(self):
+            events.append(self.name)
+
+    class VS(_FakeVS):
+        async def close(self):
+            await super().close()
+            events.append("session")
+
+    async def deploy(**kw):
+        if failure == "deploy":
+            raise RuntimeError("deploy failed")
+
+    async def poll(*args):
+        raise asyncio.CancelledError
+
+    async def scenario():
+        await run_main(
+            addon_name="Test", version="1.0", setup_logging=lambda: None,
+            run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, Resource("health")),
+            load_state=dict, save_state=lambda s: None, latest={},
+            vsession_factory=VS, support_endpoints=set(),
+            detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0),
+            run_deploy=deploy, poll_once=poll, api_timeout_total=60, log=LOG,
+        )
+
+    with pytest.raises((asyncio.CancelledError, RuntimeError)):
+        asyncio.run(scenario())
+    assert events == ["session", "health", "client"]
     assert fc.closed is True
+
+
+@pytest.mark.parametrize("failure", ["load", "factory"])
+def test_run_main_cleans_health_when_startup_acquisition_fails(monkeypatch, failure):
+    _wire_harness(monkeypatch)
+    events = []
+
+    class Health:
+        async def cleanup(self):
+            events.append("health")
+
+    def load_state():
+        if failure == "load":
+            raise RuntimeError("load failed")
+        return {}
+
+    def factory(locale):
+        if failure == "factory":
+            raise RuntimeError("factory failed")
+        return _FakeVS(locale)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_main(
+            addon_name="Test", version="1.0", setup_logging=lambda: None,
+            run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, Health()),
+            load_state=load_state, save_state=lambda s: None, latest={},
+            vsession_factory=factory, support_endpoints=set(),
+            detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0),
+            run_deploy=lambda **kw: asyncio.sleep(0), poll_once=lambda *a: asyncio.sleep(0),
+            api_timeout_total=60, log=LOG,
+        ))
+    assert events == ["health"]
+
+
+@pytest.mark.parametrize("failure", ["session", "health", "cancel"])
+def test_run_main_attempts_every_cleanup_after_an_earlier_cleanup_fails(monkeypatch, failure):
+    fc, _ = _wire_harness(monkeypatch)
+    events = []
+
+    class Health:
+        async def cleanup(self):
+            events.append("health")
+            if failure == "health":
+                raise RuntimeError("health close failed")
+
+    class VS(_FakeVS):
+        async def close(self):
+            events.append("session")
+            if failure in {"session", "cancel"}:
+                raise asyncio.CancelledError if failure == "cancel" else RuntimeError("session close failed")
+
+    async def close_client():
+        await _FakeSnapshotsClient.close(fc)
+        events.append("client")
+
+    fc.close = close_client
+
+    class Stop:
+        def is_set(self):
+            return True
+
+        def set(self):
+            pass
+
+        async def wait(self):
+            return None
+
+    with pytest.raises((RuntimeError, asyncio.CancelledError)):
+        asyncio.run(run_main(
+            addon_name="Test", version="1.0", setup_logging=lambda: None,
+            run_command="h", start_health_server=lambda **kw: asyncio.sleep(0, Health()),
+            load_state=dict, save_state=lambda s: None, latest={},
+            vsession_factory=VS, support_endpoints=set(),
+            detect_supported=lambda vs, supported=None, unresolved=None: asyncio.sleep(0),
+            run_deploy=lambda **kw: asyncio.sleep(0), poll_once=lambda *a: asyncio.sleep(0),
+            api_timeout_total=60, log=LOG, event_factory=Stop,
+        ))
+    assert events == ["session", "health", "client"]
+    assert fc.closed is True
+
+
+def test_health_server_cleans_runner_when_site_start_fails():
+    fake_web = _make_fake_web()
+
+    class FailingSite:
+        def __init__(self, runner, host, port):
+            self.runner = runner
+
+        async def start(self):
+            raise RuntimeError("bind failed")
+
+    fake_web.TCPSite = FailingSite
+    holder = {}
+
+    class Runner(fake_web.AppRunner):
+        def __init__(self, app):
+            super().__init__(app)
+            holder["runner"] = self
+
+    fake_web.AppRunner = Runner
+    with pytest.raises(RuntimeError, match="bind failed"):
+        asyncio.run(start_health_server(
+            panel_file="unused", latest={}, log=LOG, port=0, web_mod=fake_web,
+        ))
+    assert holder["runner"].cleaned_up is True

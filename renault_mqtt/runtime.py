@@ -104,8 +104,12 @@ async def start_health_server(
     app.router.add_get("/", _page if panel_page_fn is None else panel_page_fn)
     app.router.add_get("/api/state", _state if panel_state_fn is None else panel_state_fn)
     runner = web_mod.AppRunner(app)
-    await runner.setup()
-    await web_mod.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104
+    try:
+        await runner.setup()
+        await web_mod.TCPSite(runner, "0.0.0.0", port).start()  # nosec B104
+    except BaseException:
+        await runner.cleanup()
+        raise
     log.info("Health endpoint + status panel listening on :%d", port)
     return runner
 
@@ -131,6 +135,7 @@ async def run_main(
     latest,
     vsession_factory,
     support_endpoints,
+    initial_supported=frozenset(),
     detect_supported,
     run_deploy,
     poll_once,
@@ -179,96 +184,107 @@ async def run_main(
     poll_budget = max(30, interval - 10)
     health_state = {"deadline": None}
     health = await start_health_server(health_state=health_state)
-    state = load_state()
-    last_data = {}
-    latest.update(ok=False, last_poll=None, data={})
-    vsession = vsession_factory(locale)
-    unresolved = set(support_endpoints)
-    supported = set()
+    vsession = None
+    client = None
     try:
-        supported = await wait_for(detect_supported(vsession, unresolved=unresolved),
-                                   timeout=poll_budget)
-    except asyncio.TimeoutError:
-        log.warning("Endpoint detection timed out; polling without discovery until it succeeds")
-    mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = supported, dist_unit
-    latest["supported"] = sorted(supported)
-    latest["dist_unit"] = dist_unit
-    client = mqtt.mqtt_connect(snapshots=True)
-    await run_deploy(refresh_location=bool(mqtt.PUBLISH_LOCATION and mqtt.ENABLE_REFRESH_LOCATION))
-
-    if stop is None:
-        stop = event_factory()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop.set)
-
-    fails = 0
-    max_backoff = max(interval, 1800)
-    health_state["deadline"] = monotonic() + poll_budget + HEALTH_GRACE
-    while not stop.is_set():
+        state = load_state()
+        last_data = {}
+        latest.update(ok=False, last_poll=None, data={})
+        vsession = vsession_factory(locale)
+        unresolved = set(support_endpoints)
+        supported = set(initial_supported)
         try:
-            t0 = monotonic()
-            data, location_attrs = await wait_for(
-                poll_once(vsession, state, capacity, supported, dist_unit),
-                timeout=max(30, interval - 10))
-            if unresolved:
-                previous = set(supported)
-                try:
-                    await wait_for(detect_supported(vsession, supported, unresolved),
-                                   timeout=min(api_timeout_total, max(30, interval - 10)))
-                except Exception as err:  # noqa: BLE001
-                    log.warning("Endpoint-support retry failed: %s", redact(err))
-                if supported != previous:
-                    mqtt._MQTT_CTX["supported"] = supported
-                    latest["supported"] = sorted(supported)
-                    mqtt.publish_discovery(client, supported, dist_unit)
-            fails = 0
-            state["last_success"] = now()
-            data["api_auth_failure"] = "off"
-            data["last_successful_poll"] = iso(state["last_success"])
-            data.update(freshness_fields(state, data.get(last_updated_key), stale_secs,
-                                         state["last_success"]))
-            last_data = data
-            latest.update(ok=True, last_poll=iso(now()), data=data)
-            if location_attrs:
-                client.snapshots.update(data, location=location_attrs)
-            else:
-                client.snapshots.update(data)
-            save_state(state)
-            if log_duration:
-                log.info("Published in %.1fs: %s%% battery, plug=%s, charging=%s, suspect=%s",
-                         monotonic() - t0, data.get("battery_level"),
-                         data.get(plug_key), data.get("charging"), data.get("plug_suspect"))
-            else:
-                log.info("Published: %s%% battery, plug=%s, charging=%s, suspect=%s",
-                         data.get("battery_level"), data.get(plug_key),
-                         data.get("charging"), data.get("plug_suspect"))
-        except Exception as err:  # noqa: BLE001
-            fails += 1
-            log.error("Poll failed (%d in a row): %s", fails, redact(err))
-            last_ok = state.get("last_success", 0)
-            fresh = freshness_fields(state, None, stale_secs, last_ok)
-            auth = is_auth_failure(err, auth_exceptions=auth_exceptions, http_error_type=http_error_type)
-            if auth or fails % 3 == 0:
-                await vsession.invalidate()
-            data = {
-                **last_data,
-                "api_auth_failure": "on" if auth else "off",
-                "last_successful_poll": iso(last_ok),
-                **fresh,
-            }
-            client.snapshots.update(data)
-            latest.update(ok=False, last_poll=iso(now()), error=redact(err), data=data)
-            save_state(state)
-        wait = interval if fails == 0 else min(interval * 2 ** (fails - 1), max_backoff)
-        # The loop is alive if an iteration completed, success or failure; the deadline covers
-        # the sleep and the next poll, so only a loop that stops completing reports stalled.
-        health_state["deadline"] = monotonic() + wait + poll_budget + HEALTH_GRACE
-        try:
-            await wait_for(stop.wait(), timeout=wait)
+            await wait_for(detect_supported(vsession, supported, unresolved),
+                           timeout=poll_budget)
         except asyncio.TimeoutError:
-            pass
+            supported.update(set(initial_supported) & unresolved)
+            log.warning("Endpoint detection timed out; polling without discovery until it succeeds")
+        mqtt._MQTT_CTX["supported"], mqtt._MQTT_CTX["dist_unit"] = supported, dist_unit
+        latest["supported"] = sorted(supported)
+        latest["dist_unit"] = dist_unit
+        client = mqtt.mqtt_connect(snapshots=True)
+        await run_deploy(refresh_location=bool(mqtt.PUBLISH_LOCATION and mqtt.ENABLE_REFRESH_LOCATION))
 
-    log.info("Shutting down")
-    await vsession.close()
-    await health.cleanup()
-    await client.snapshots.close()
+        if stop is None:
+            stop = event_factory()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop.set)
+
+        fails = 0
+        max_backoff = max(interval, 1800)
+        retry_budget = min(api_timeout_total, poll_budget)
+        iteration_budget = poll_budget + retry_budget
+        health_state["deadline"] = monotonic() + iteration_budget + HEALTH_GRACE
+        while not stop.is_set():
+            try:
+                t0 = monotonic()
+                data, location_attrs = await wait_for(
+                    poll_once(vsession, state, capacity, supported, dist_unit),
+                    timeout=poll_budget)
+                if unresolved:
+                    previous = set(supported)
+                    try:
+                        await wait_for(detect_supported(vsession, supported, unresolved),
+                                       timeout=retry_budget)
+                    except Exception as err:  # noqa: BLE001
+                        log.warning("Endpoint-support retry failed: %s", redact(err))
+                    if supported != previous:
+                        mqtt._MQTT_CTX["supported"] = supported
+                        latest["supported"] = sorted(supported)
+                        mqtt.publish_discovery(client, supported, dist_unit)
+                fails = 0
+                state["last_success"] = now()
+                data["api_auth_failure"] = "off"
+                data["last_successful_poll"] = iso(state["last_success"])
+                data.update(freshness_fields(state, data.get(last_updated_key), stale_secs,
+                                             state["last_success"]))
+                last_data = data
+                latest.update(ok=True, last_poll=iso(now()), data=data)
+                if location_attrs:
+                    client.snapshots.update(data, location=location_attrs)
+                else:
+                    client.snapshots.update(data)
+                save_state(state)
+                if log_duration:
+                    log.info("Published in %.1fs: %s%% battery, plug=%s, charging=%s, suspect=%s",
+                             monotonic() - t0, data.get("battery_level"),
+                             data.get(plug_key), data.get("charging"), data.get("plug_suspect"))
+                else:
+                    log.info("Published: %s%% battery, plug=%s, charging=%s, suspect=%s",
+                             data.get("battery_level"), data.get(plug_key),
+                             data.get("charging"), data.get("plug_suspect"))
+            except Exception as err:  # noqa: BLE001
+                fails += 1
+                log.error("Poll failed (%d in a row): %s", fails, redact(err))
+                last_ok = state.get("last_success", 0)
+                fresh = freshness_fields(state, None, stale_secs, last_ok)
+                auth = is_auth_failure(err, auth_exceptions=auth_exceptions, http_error_type=http_error_type)
+                if auth or fails % 3 == 0:
+                    await vsession.invalidate()
+                data = {
+                    **last_data,
+                    "api_auth_failure": "on" if auth else "off",
+                    "last_successful_poll": iso(last_ok),
+                    **fresh,
+                }
+                client.snapshots.update(data)
+                latest.update(ok=False, last_poll=iso(now()), error=redact(err), data=data)
+                save_state(state)
+            wait = interval if fails == 0 else min(interval * 2 ** (fails - 1), max_backoff)
+            # Cover the sleep and every explicitly bounded operation in the next iteration.
+            health_state["deadline"] = monotonic() + wait + iteration_budget + HEALTH_GRACE
+            try:
+                await wait_for(stop.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        log.info("Shutting down")
+        try:
+            if vsession is not None:
+                await vsession.close()
+        finally:
+            try:
+                await health.cleanup()
+            finally:
+                if client is not None:
+                    await client.snapshots.close()

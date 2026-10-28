@@ -10,7 +10,8 @@ async def resolve_support(probe, supported, unresolved, on_error):
     support. Cancellation propagates with completed answers intact. The caller owns
     defaults, deadlines, acquisition, invalidation and logging; calls are serialized.
     """
-    for ep in sorted(unresolved):
+    pending = sorted(unresolved)
+    for ep in pending:
         try:
             if await probe(ep):
                 supported.add(ep)
