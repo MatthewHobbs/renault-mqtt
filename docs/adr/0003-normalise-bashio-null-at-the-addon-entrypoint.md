@@ -1,13 +1,14 @@
 # ADR 0003 — Normalise bashio's "null" at the add-on entrypoint, not in core
 
-- **Status:** Proposed 2026-10-29.
+- **Status:** Accepted 2026-10-29. I accepted Option 1 below.
 - **Context:** `a290-ha-addon` 1.30.2 shipped a regression (#309) where leaving the optional
   `precondition_temperature` unset caused Start Climate to fail with
   `ValueError: could not convert string to float: 'null'`, and clearing `account_id` passed `"null"`
   as the Kamereon account id and masked the substring `"null"` across logs. Fixed for those two keys
-  in `run.sh` in `a290-ha-addon` 1.30.3 (#309, merge `12ae0e3`) and `r5-ha-addon` 1.10.0 (#209,
-  merge `10273da6139908974e7203c0b8914ed582ce2fb5`). Proposed as RFC 0001: handling bashio's
-  `"null"` output for unset optional settings in `renault-mqtt`.
+  in `run.sh` in `a290-ha-addon` 1.30.3 (#309, merge
+  `12ae0e3399f0692107f64ea7e078f301eea1ec6e`) and `r5-ha-addon` 1.10.0 (#209, merge
+  `10273da6139908974e7203c0b8914ed582ce2fb5`). The question was captured in RFC 0001: handling
+  bashio's `"null"` output for unset optional settings in `renault-mqtt`.
 - **North star:** every optional (`?`) setting declared in an add-on's `config.yaml` `schema:` is
   exported by `run.sh` through `opt()` so that an unset or cleared option reaches every Python
   reader in the container (`renault_mqtt`, `main.py`, and `deploy.py`) as the empty string `""`,
@@ -63,11 +64,11 @@ Decisions I confirmed on 2026-10-29:
 
 | # | Step | Owner | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 1 | `a290-ha-addon`: normalise `"null"` to `""` via `opt()` in `run.sh` for `account_id` and `precondition_temperature`; pin in `test_main.py` | a290-ha-addon | Done | [PR #309](https://github.com/MatthewHobbs/a290-ha-addon/pull/309) (branch `4643c55`, merge `12ae0e3`), shipped in v1.30.3 |
+| 1 | `a290-ha-addon`: normalise `"null"` to `""` via `opt()` in `run.sh` for `account_id` and `precondition_temperature`; pin in `test_main.py` | a290-ha-addon | Done | [PR #309](https://github.com/MatthewHobbs/a290-ha-addon/pull/309) (branch `4643c55`, merge `12ae0e3399f0692107f64ea7e078f301eea1ec6e`), shipped in v1.30.3 |
 | 2 | `r5-ha-addon`: the same in `renault_5/run.sh` and `renault_5/tests/test_main.py` | r5-ha-addon | Done | [PR #209](https://github.com/MatthewHobbs/r5-ha-addon/pull/209) (branch `50109a0`, merge `10273da6139908974e7203c0b8914ed582ce2fb5`), shipped in v1.10.0 |
-| 3 | `a290-ha-addon`: wrap `charger_*` in `opt()` in `alpine_a290/run.sh` and enforce with a structural test in `alpine_a290/tests/test_main.py` covering every `?` key in `alpine_a290/config.yaml` `schema:` | a290-ha-addon | Open | |
-| 4 | `r5-ha-addon`: mirror row 3 in `renault_5/run.sh` and `renault_5/tests/test_main.py` | r5-ha-addon | Open | |
-| 5 | Document `opt()` and the structural test requirement for optional (`?`) schema keys in `docs/adding-a-model.md` | renault-mqtt | Open | |
+| 3 | `a290-ha-addon`: wrap `charger_*` in `opt()` in `alpine_a290/run.sh` and enforce with a structural test in `alpine_a290/tests/test_main.py` covering every `?` key in `alpine_a290/config.yaml` `schema:` | a290-ha-addon | Done | [PR #314](https://github.com/MatthewHobbs/a290-ha-addon/pull/314) (merge `96ff6949a99142cf384b5e2d97cde75c81839de1`); the parity transition row was retired in [PR #315](https://github.com/MatthewHobbs/a290-ha-addon/pull/315) (merge `7a1fe1dee2d07be35e52e33390483ef371398573`) |
+| 4 | `r5-ha-addon`: mirror row 3 in `renault_5/run.sh` and `renault_5/tests/test_main.py` | r5-ha-addon | Done | [PR #211](https://github.com/MatthewHobbs/r5-ha-addon/pull/211) (merge `8c60b78cda773fe622063b69aaebe1bb9b296e18`) |
+| 5 | Document `opt()` and the structural test requirement for optional (`?`) schema keys in `docs/adding-a-model.md` | renault-mqtt | Done | This PR, [#40](https://github.com/MatthewHobbs/renault-mqtt/pull/40) |
 
 Status is one of **Open**, **Done**, **Blocked**, **Dropped**. A **Done** row carries Evidence.
 
@@ -182,8 +183,14 @@ Adapted from RFC 0001, corrected for Supervisor schema validation:
 
 - RFC 0001: handling bashio's `"null"` output for unset optional settings in `renault-mqtt` (PR #40).
 - `a290-ha-addon` PR #309: https://github.com/MatthewHobbs/a290-ha-addon/pull/309 (branch `4643c55`,
-  merge `12ae0e3`).
+  merge `12ae0e3399f0692107f64ea7e078f301eea1ec6e`).
+- `a290-ha-addon` PR #314: https://github.com/MatthewHobbs/a290-ha-addon/pull/314 (merge
+  `96ff6949a99142cf384b5e2d97cde75c81839de1`).
+- `a290-ha-addon` PR #315: https://github.com/MatthewHobbs/a290-ha-addon/pull/315 (merge
+  `7a1fe1dee2d07be35e52e33390483ef371398573`; retired the parity transition row).
 - `r5-ha-addon` PR #209: https://github.com/MatthewHobbs/r5-ha-addon/pull/209 (branch `50109a0`,
   merge `10273da6139908974e7203c0b8914ed582ce2fb5`).
+- `r5-ha-addon` PR #211: https://github.com/MatthewHobbs/r5-ha-addon/pull/211 (merge
+  `8c60b78cda773fe622063b69aaebe1bb9b296e18`).
 - `hassio-addons/bashio` `lib/config.sh` (`bashio::config`), read 2026-10-29.
 - `home-assistant/supervisor` `supervisor/apps/options.py` (`AppOptions`), read 2026-10-29.

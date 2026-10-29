@@ -1,6 +1,9 @@
 # RFC 0001 — Handling bashio's `"null"` output for unset optional settings in `renault-mqtt`
 
-- **Status:** Proposed 2026-10-29. **This RFC authorises nothing; the owner decides.**
+- **Status:** Resolved by
+  [ADR 0003](../adr/0003-normalise-bashio-null-at-the-addon-entrypoint.md), accepted 2026-10-29.
+  The owner chose Option 1: normalise `"null"` at each add-on's `run.sh` boundary with `opt()` and
+  leave the core unchanged.
 - **Context:** `a290-ha-addon` 1.30.2 shipped a regression where leaving `precondition_temperature`
   empty caused **Start Climate** to fail with `ValueError: could not convert string to float: 'null'`,
   and clearing `account_id` caused the add-on to use `"null"` as the Kamereon account ID and mask

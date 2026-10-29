@@ -34,6 +34,25 @@ The shared modules (`util`, `config`, `charge`, `debug`, `mqtt`, `parse`, `fresh
 `session`, `support`, `plug`, `hvac`, `commands`, `poll`, `runtime`) do **not** live in the
 add-on — they come from this package.
 
+### Export options safely from `run.sh`
+
+`run.sh` is the boundary between Home Assistant's add-on options and the Python process. For every
+key whose type in `config.yaml`'s `schema:` ends in `?`, export the value through `opt '<key>'`.
+Do not export an optional key with raw `bashio::config '<key>'`: when an optional value is unset or
+cleared, bashio can emit the literal string `"null"`, while `opt()` normalises that sentinel to the
+empty string before any Python reader sees it. Apply the rule to every optional key, including
+future `charger_*`-style settings; do not make exceptions because one consumer currently tolerates
+`"null"`.
+
+Add a structural test beside the model's other entrypoint tests. It must read the `schema:` from
+`config.yaml`, collect every optional (`?`) key, and assert that each is exported through
+`opt '<key>'` and never through raw `bashio::config '<key>'`. Also exercise the entrypoint with an
+empty options object under a `bashio::config` stub and assert that every optional key is exported as
+`""`. This keeps the shell boundary and the schema in lockstep when a model gains a new option.
+
+This contract is recorded in [ADR 0003](adr/0003-normalise-bashio-null-at-the-addon-entrypoint.md);
+when referring to it from another repository, cite it as `renault-mqtt/ADR 0003`.
+
 ## 2. Write `catalog.py` — the per-model contract
 
 `catalog.py` is the single place your model differs. The core reads the following from it; **required**
